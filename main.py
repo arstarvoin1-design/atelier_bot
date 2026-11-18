@@ -1,9 +1,12 @@
 import asyncio
+import base64
 import html
 import json
 import logging
 import os
 import random
+import time
+import aiohttp
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, CommandStart, CommandObject
 from aiogram.types import (
@@ -19,11 +22,18 @@ from aiogram.types import (
 
 # ================= НАСТРОЙКИ МАГАЗИНА =================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 ADMIN_ID = 5100544808
 SHOP_NAME = "ATELIER"
 
-# Ссылка на сайт (впишешь сюда https://arstarvoin1-design.github.io/atelier-shop/, когда выложим сайт)
+# Ссылка на твой сайт (уже подключена к кнопке «🛍 Открыть магазин»)
 SITE_URL = "https://arstarvoin1-design.github.io/atelier-shop/"
+
+# Репозиторий сайта, где хранится общая база товаров catalog.json и фото
+GH_OWNER = "arstarvoin1-design"
+GH_REPO = "atelier-shop"
+GH_BRANCH = "main"
+CATALOG_PATH = "catalog.json"
 
 # Канал бренда для проверки подписки за промокод (например "@atelier_brand" или оставь "")
 CHANNEL_USERNAME = ""
@@ -60,43 +70,55 @@ SIZE_GUIDE_TEXT = (
     "💡 <i>Вещи имеют свободный оверсайз-крой. Если сомневаетесь между двумя размерами — напишите свой рост и вес менеджеру, мы точно подскажем!</i>"
 )
 
-# Стартовые товары (загрузятся при первом запуске, дальше всё хранится в catalog.json)
 DEFAULT_CATALOG = [
     {
+        "id": 1,
+        "category": "hoodie",
         "name": "Худи ATELIER Heavyweight Black",
-        "price": "5 900 ₽",
+        "price": 5900,
+        "fabric": "Футер 460 г/м²",
         "sizes": ["S", "M", "L", "XL"],
-        "desc": "Плотный футер 460 г/м², 100% хлопок, объемный капюшон и спущенное плечо.",
-        "photos": []
+        "desc": "100% хлопок диагональ, двойной объемный капюшон и спущенное плечо.",
+        "photos": ["https://images.unsplash.com/photo-1556821840-3a63f95609a7?auto=format&fit=crop&w=800&q=80"]
     },
     {
+        "id": 2,
+        "category": "tee",
         "name": "Футболка ATELIER Boxy Fit White",
-        "price": "2 900 ₽",
+        "price": 2900,
+        "fabric": "Хлопок 260 г/м²",
         "sizes": ["S", "M", "L", "XL"],
-        "desc": "Плотный хлопок 260 г/м², не просвечивает, держит форму после стирок.",
-        "photos": []
+        "desc": "Плотный джерси, не просвечивает, воротник-резинка держит форму после стирок.",
+        "photos": ["https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&w=800&q=80"]
     },
     {
+        "id": 3,
+        "category": "sweatshirt",
         "name": "Свитшот ATELIER Graphite",
-        "price": "4 800 ₽",
+        "price": 4800,
+        "fabric": "Футер 420 г/м²",
         "sizes": ["M", "L", "XL"],
-        "desc": "Свободный крой, мягкий начес внутри, минималистичная вышивка в тон.",
-        "photos": []
+        "desc": "Свободный крой, мягкий браш внутри, минималистичная вышивка в тон.",
+        "photos": ["https://images.unsplash.com/photo-1614975059251-992f11792b9f?auto=format&fit=crop&w=800&q=80"]
     }
 ]
 # ======================================================
 
 USERS_FILE = "users.json"
 ORDERS_FILE = "orders.json"
-CATALOG_FILE = "catalog.json"
+LOCAL_CATALOG_FILE = "catalog.json"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# Временное состояние для загрузки альбомов и добавления фото к товару
 media_groups_buffer: dict[str, dict] = {}
 admin_wait_photo_idx: int | None = None
+
+# Кэш синхронизированного каталога (обновляется каждые 8 сек или мгновенно при изменении)
+_catalog_cache: list | None = None
+_catalog_cache_ts: float = 0.0
+_catalog_sha: str | None = None
 
 
 def load_json(filename, default):
@@ -114,21 +136,165 @@ def save_json(filename, data):
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def get_catalog() -> list:
-    if not os.path.exists(CATALOG_FILE):
-        save_json(CATALOG_FILE, DEFAULT_CATALOG)
-        return list(DEFAULT_CATALOG)
-    items = load_json(CATALOG_FILE, [])
-    # Совместимость со старыми товарами, где было поле "photo" вместо "photos"
-    for item in items:
-        if "photos" not in item:
-            old_photo = item.pop("photo", "")
-            item["photos"] = [old_photo] if old_photo else []
-    return items
+def parse_price_int(val) -> int:
+    if isinstance(val, int):
+        return val
+    digits = "".join(ch for ch in str(val) if ch.isdigit())
+    return int(digits) if digits else 0
 
 
-def save_catalog(items: list):
-    save_json(CATALOG_FILE, items)
+def format_price_str(val) -> str:
+    num = parse_price_int(val)
+    return f"{num:,}".replace(",", " ") + " ₽" if num else str(val)
+
+
+def detect_category(name: str) -> str:
+    low = name.lower()
+    if "худи" in low or "hoodie" in low:
+        return "hoodie"
+    if "футболк" in low or "tee" in low or "майк" in low:
+        return "tee"
+    if "свитшот" in low or "sweatshirt" in low or "лонгслив" in low:
+        return "sweatshirt"
+    if "штан" in low or "брюк" in low or "шорт" in low or "джоггер" in low:
+        return "pants"
+    return "other"
+
+
+def normalize_items(items: list) -> list:
+    result = []
+    for i, item in enumerate(items):
+        photos = item.get("photos")
+        if photos is None:
+            old_p = item.get("photo") or item.get("image") or ""
+            photos = [old_p] if old_p else []
+        result.append({
+            "id": item.get("id", i + 1),
+            "category": item.get("category") or detect_category(item.get("name", "")),
+            "name": item.get("name", "Товар ATELIER"),
+            "price": parse_price_int(item.get("price", 0)),
+            "fabric": item.get("fabric", "100% хлопок"),
+            "sizes": item.get("sizes") or ["S", "M", "L", "XL"],
+            "desc": item.get("desc", ""),
+            "photos": photos,
+        })
+    return result
+
+
+# ================= СИНХРОНИЗАЦИЯ С GITHUB (САЙТ <-> БОТ) =================
+async def fetch_synced_catalog(force: bool = False) -> list:
+    global _catalog_cache, _catalog_cache_ts, _catalog_sha
+
+    if not force and _catalog_cache is not None and (time.time() - _catalog_cache_ts < 8):
+        return _catalog_cache
+
+    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/{CATALOG_PATH}?t={int(time.time())}"
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if GITHUB_TOKEN:
+        headers["Authorization"] = f"token {GITHUB_TOKEN}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=10) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    _catalog_sha = data.get("sha")
+                    raw_bytes = base64.b64decode(data["content"])
+                    items = normalize_items(json.loads(raw_bytes.decode("utf-8")))
+                    _catalog_cache = items
+                    _catalog_cache_ts = time.time()
+                    save_json(LOCAL_CATALOG_FILE, items)
+                    return items
+    except Exception as e:
+        logging.warning(f"Не удалось прочитать catalog.json с GitHub: {e}")
+
+    local = load_json(LOCAL_CATALOG_FILE, DEFAULT_CATALOG)
+    _catalog_cache = normalize_items(local)
+    _catalog_cache_ts = time.time()
+    return _catalog_cache
+
+
+async def save_synced_catalog(items: list, commit_msg: str = "Update catalog from Telegram bot") -> bool:
+    global _catalog_cache, _catalog_cache_ts, _catalog_sha
+
+    normalized = normalize_items(items)
+    save_json(LOCAL_CATALOG_FILE, normalized)
+    _catalog_cache = normalized
+    _catalog_cache_ts = time.time()
+
+    if not GITHUB_TOKEN:
+        return False
+
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+    url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/{CATALOG_PATH}"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            # Уточняем свежий sha файла перед записью
+            async with session.get(f"{url}?t={int(time.time())}", headers=headers, timeout=10) as get_resp:
+                if get_resp.status == 200:
+                    meta = await get_resp.json()
+                    _catalog_sha = meta.get("sha")
+
+            encoded = base64.b64encode(
+                json.dumps(normalized, ensure_ascii=False, indent=2).encode("utf-8")
+            ).decode("utf-8")
+
+            payload = {
+                "message": commit_msg,
+                "content": encoded,
+                "branch": GH_BRANCH,
+            }
+            if _catalog_sha:
+                payload["sha"] = _catalog_sha
+
+            async with session.put(url, headers=headers, json=payload, timeout=15) as put_resp:
+                if put_resp.status in (200, 201):
+                    res_data = await put_resp.json()
+                    _catalog_sha = res_data["content"]["sha"]
+                    return True
+                else:
+                    err_text = await put_resp.text()
+                    logging.error(f"GitHub PUT catalog error: {err_text}")
+    except Exception as e:
+        logging.error(f"Ошибка записи catalog.json в GitHub: {e}")
+    return False
+
+
+async def upload_tg_photo_to_github(file_id: str, index: int = 0) -> str:
+    """Скачивает фото из Telegram и загружает его в GitHub, возвращая публичную HTTPS-ссылку для сайта и бота."""
+    if not GITHUB_TOKEN:
+        return file_id
+
+    try:
+        tg_file = await bot.get_file(file_id)
+        buf = await bot.download_file(tg_file.file_path)
+        img_bytes = buf.read()
+
+        filename = f"images/tg_{int(time.time())}_{index}.jpg"
+        url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/{filename}"
+        headers = {
+            "Authorization": f"token {GITHUB_TOKEN}",
+            "Accept": "application/vnd.github.v3+json",
+        }
+        payload = {
+            "message": f"Upload {filename} from Telegram bot",
+            "content": base64.b64encode(img_bytes).decode("utf-8"),
+            "branch": GH_BRANCH,
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.put(url, headers=headers, json=payload, timeout=20) as resp:
+                if resp.status in (200, 201):
+                    return f"https://raw.githubusercontent.com/{GH_OWNER}/{GH_REPO}/{GH_BRANCH}/{filename}"
+    except Exception as e:
+        logging.error(f"Ошибка загрузки фото в GitHub: {e}")
+
+    return file_id
+# ========================================================================
 
 
 def register_user(user_id: int):
@@ -174,7 +340,6 @@ def get_catalog_keyboard(index: int, total: int, photo_idx: int = 0, photos_coun
     next_idx = (index + 1) % total
     buttons = []
 
-    # Если у товара 2 и более фото — добавляем кнопку переключения ракурсов
     if photos_count > 1:
         next_photo = (photo_idx + 1) % photos_count
         buttons.append([
@@ -214,7 +379,6 @@ def get_order_admin_keyboard(order_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-# Отправка QR-кода, ссылки СБП и реквизитов
 async def send_sbp_payment(chat_id: int, prefix_text: str = ""):
     full_text = f"{prefix_text}\n\n{PAYMENT_TEXT}".strip()
     kb = get_payment_keyboard()
@@ -241,15 +405,13 @@ async def send_sbp_payment(chat_id: int, prefix_text: str = ""):
     )
 
 
-# Вспомогательная функция создания товара из команды /add
-async def create_product_from_raw(target_message: types.Message, raw_text: str, photo_ids: list[str]):
+async def create_product_from_raw(target_message: types.Message, raw_text: str, tg_file_ids: list[str]):
     payload = raw_text.partition(" ")[2].strip()
     if not payload:
         await target_message.answer(
-            "➕ <b>Как добавить товар в каталог:</b>\n\n"
+            "➕ <b>Как добавить товар в каталог (появится и в боте, и на сайте):</b>\n\n"
             "Отправь <b>1 фото или целый альбом</b> и в подписи напиши:\n"
-            "<code>/add Худи ATELIER Black | 5 900 ₽ | S, M, L, XL | Плотный футер 460 г/м²</code>\n\n"
-            "<i>Разделитель — вертикальная черта <code>|</code>. Чтобы добавить фото к уже существующей вещи, открой «👕 Каталог» и нажми «📸 + Фото».</i>",
+            "<code>/add Худи ATELIER Black | 5 900 ₽ | S, M, L, XL | Плотный футер 460 г/м²</code>",
             parse_mode="HTML"
         )
         return
@@ -264,43 +426,57 @@ async def create_product_from_raw(target_message: types.Message, raw_text: str, 
         return
 
     name = parts[0]
-    price = parts[1]
+    price_num = parse_price_int(parts[1])
     sizes = [s.strip() for s in parts[2].split(",") if s.strip()] if len(parts) > 2 and parts[2] else ["S", "M", "L", "XL"]
     desc = parts[3] if len(parts) > 3 else ""
 
-    catalog = get_catalog()
+    status_msg = await target_message.answer("⏳ Загружаем фото и синхронизируем с сайтом...")
+
+    uploaded_photos = []
+    for idx, fid in enumerate(tg_file_ids):
+        uploaded_photos.append(await upload_tg_photo_to_github(fid, idx))
+
+    catalog = await fetch_synced_catalog(force=True)
     catalog.append({
+        "id": int(time.time() * 1000),
+        "category": detect_category(name),
         "name": name,
-        "price": price,
+        "price": price_num,
+        "fabric": "100% хлопок",
         "sizes": sizes,
         "desc": desc,
-        "photos": photo_ids
+        "photos": uploaded_photos
     })
-    save_catalog(catalog)
+    synced = await save_synced_catalog(catalog, f"Add product from bot: {name}")
 
-    photo_status = f"фото: {len(photo_ids)} шт. ✅" if photo_ids else "без фото"
-    await target_message.answer(
-        f"✅ <b>Товар добавлен в каталог ({photo_status})!</b>\n\n"
+    sync_note = "синхронизировано с сайтом ✅" if synced else "сохранено локально (добавь GITHUB_TOKEN в Bothost для синхронизации с сайтом)"
+    await status_msg.edit_text(
+        f"✅ <b>Товар добавлен ({sync_note})!</b>\n\n"
         f"• Название: <b>{html.escape(name)}</b>\n"
-        f"• Цена: <b>{html.escape(price)}</b>\n"
+        f"• Цена: <b>{format_price_str(price_num)}</b>\n"
         f"• Размеры: <b>{html.escape(', '.join(sizes))}</b>\n"
-        f"• Всего позиций в каталоге: <b>{len(catalog)}</b>",
+        f"• Фото: <b>{len(uploaded_photos)} шт.</b>",
         parse_mode="HTML"
     )
 
 
-async def append_photos_to_product(target_message: types.Message, idx: int, new_photos: list[str]):
+async def append_photos_to_product(target_message: types.Message, idx: int, tg_file_ids: list[str]):
     global admin_wait_photo_idx
-    catalog = get_catalog()
+    catalog = await fetch_synced_catalog(force=True)
     if 0 <= idx < len(catalog):
-        catalog[idx].setdefault("photos", []).extend(new_photos)
-        save_catalog(catalog)
+        status_msg = await target_message.answer("⏳ Загружаем новые фото на сайт и в бот...")
+        new_urls = []
+        for i, fid in enumerate(tg_file_ids):
+            new_urls.append(await upload_tg_photo_to_github(fid, i))
+
+        catalog[idx].setdefault("photos", []).extend(new_urls)
+        await save_synced_catalog(catalog, f"Add photos to {catalog[idx]['name']}")
         total_pics = len(catalog[idx]["photos"])
         item_name = html.escape(catalog[idx]["name"])
         admin_wait_photo_idx = None
-        await target_message.answer(
-            f"✅ Добавлено фото: <b>{len(new_photos)} шт.</b>\n"
-            f"Теперь у товара <b>«{item_name}»</b> всего <b>{total_pics} фото</b>!",
+        await status_msg.edit_text(
+            f"✅ Добавлено фото: <b>{len(new_urls)} шт.</b>\n"
+            f"Теперь у товара <b>«{item_name}»</b> всего <b>{total_pics} фото</b> (обновилось и на сайте, и в боте)!",
             parse_mode="HTML"
         )
     else:
@@ -315,13 +491,15 @@ async def cmd_start(message: types.Message, command: CommandObject):
     register_user(user_id)
 
     if user_id == ADMIN_ID:
+        sync_status = "подключена ✅" if GITHUB_TOKEN else "не настроена (добавь GITHUB_TOKEN в Bothost)"
         await message.answer(
-            f"👋 Привет, Арсен! Бот магазина <b>{SHOP_NAME}</b> работает в облаке 24/7.\n\n"
+            f"👋 Привет, Арсен! Бот магазина <b>{SHOP_NAME}</b> работает в облаке 24/7.\n"
+            f"🔄 Синхронизация каталога с сайтом: <b>{sync_status}</b>\n\n"
             "<b>Твои команды владельца:</b>\n"
-            "• <code>/add Название | Цена | Размеры | Описание</code> — добавить товар (можно прикрепить сразу альбом из нескольких фото)\n"
-            "• <b>👕 Каталог</b> → кнопки <b>📸 + Фото</b> и <b>🗑 Удалить</b> под каждым товаром\n"
+            "• <code>/add Название | Цена | Размеры | Описание</code> — добавить товар (с фото или альбомом)\n"
+            "• <b>👕 Каталог</b> → кнопки <b>📸 + Фото</b> и <b>🗑 Удалить</b>\n"
             "• <code>/stats</code> — статистика клиентов и заказов\n"
-            "• <code>/send текст</code> — рассылка всем пользователям (или ответь <code>/send</code> на фото)\n"
+            "• <code>/send текст</code> — рассылка всем пользователям\n"
             "• <b>Ответить (Reply)</b> на карточку клиента — написать покупателю от имени магазина.",
             parse_mode="HTML",
             reply_markup=get_main_keyboard()
@@ -349,15 +527,15 @@ async def cmd_start(message: types.Message, command: CommandObject):
     else:
         await message.answer(
             f"👋 Добро пожаловать в официальный бот магазина <b>{SHOP_NAME}</b>!\n\n"
-            "Здесь можно посмотреть каталог, подобрать размер, оплатить заказ по СБП или задать вопрос менеджеру 👇",
+            "Откройте витрину магазина кнопкой <b>«🛍 Открыть магазин»</b> или выберите раздел ниже 👇",
             parse_mode="HTML",
             reply_markup=get_main_keyboard()
         )
 
 
-# 2. Обработка альбомов (media_group_id) от админа для /add или добавления фото к товару
+# 2. Обработка альбомов от админа
 async def finalize_media_group(mg_id: str):
-    await asyncio.sleep(0.8)
+    await asyncio.sleep(0.9)
     data = media_groups_buffer.pop(mg_id, None)
     if not data:
         return
@@ -389,7 +567,7 @@ async def handle_admin_album(message: types.Message):
         media_groups_buffer[mg_id]["message"] = message
 
 
-# 3. Админ-команды: добавление товара (1 фото или текст), отмена, статистика, рассылка
+# 3. Админ-команды
 @dp.message(Command("cancel"), F.from_user.id == ADMIN_ID)
 async def cmd_cancel_admin(message: types.Message):
     global admin_wait_photo_idx
@@ -413,12 +591,12 @@ async def cmd_add_product(message: types.Message):
 async def cmd_stats(message: types.Message):
     users = load_json(USERS_FILE, [])
     orders = load_json(ORDERS_FILE, {})
-    catalog = get_catalog()
+    catalog = await fetch_synced_catalog(force=True)
     await message.answer(
         f"📊 <b>Статистика {SHOP_NAME}:</b>\n\n"
         f"• Пользователей в боте: <b>{len(users)}</b>\n"
         f"• Привязанных заказов: <b>{len(orders)}</b>\n"
-        f"• Товаров в каталоге: <b>{len(catalog)}</b>",
+        f"• Товаров в общем каталоге: <b>{len(catalog)}</b>",
         parse_mode="HTML"
     )
 
@@ -498,7 +676,7 @@ async def send_promo(message: types.Message):
     if not CHANNEL_USERNAME:
         await message.answer(
             f"🎁 Ваш персональный промокод на первый заказ: <code>{PROMO_CODE}</code>\n\n"
-            "Укажите его в комментарии к заказу или напишите менеджеру для активации скидки!",
+            "Укажите его на сайте в корзине или напишите менеджеру для активации скидки!",
             parse_mode="HTML"
         )
         return
@@ -541,13 +719,13 @@ async def callback_check_sub(callback: types.CallbackQuery):
     await callback.answer("Вы пока не подписались на канал 😔", show_alert=True)
 
 
-# 6. Мини-каталог с переключением нескольких фото, добавлением и удалением
+# 6. Синхронизированный каталог в боте
 def format_product_caption(item: dict) -> str:
     sizes_str = ", ".join(item.get("sizes", []))
     desc_block = f"\n\n{html.escape(item['desc'])}" if item.get("desc") else ""
     return (
         f"👕 <b>{html.escape(item['name'])}</b>\n\n"
-        f"💰 Цена: <b>{html.escape(item['price'])}</b>\n"
+        f"💰 Цена: <b>{format_price_str(item['price'])}</b>\n"
         f"📐 Размеры в наличии: <b>{html.escape(sizes_str)}</b>"
         f"{desc_block}"
     )
@@ -558,9 +736,10 @@ async def render_catalog_item(
     idx: int,
     is_admin: bool,
     replace: bool = False,
-    photo_idx: int = 0
+    photo_idx: int = 0,
+    force_refresh: bool = False
 ):
-    catalog = get_catalog()
+    catalog = await fetch_synced_catalog(force=force_refresh)
     if not catalog:
         empty_text = "🛍 Каталог пока пуст. Новые позиции скоро появятся!"
         if is_admin:
@@ -589,7 +768,6 @@ async def render_catalog_item(
     )
 
     if replace:
-        # Если и старое, и новое сообщение с фото — плавно меняем картинку без мигания
         if target_message.photo and current_photo:
             try:
                 await target_message.edit_media(
@@ -627,7 +805,7 @@ async def render_catalog_item(
 @dp.message(F.text == "👕 Каталог")
 async def show_catalog(message: types.Message):
     is_admin = (message.from_user.id == ADMIN_ID)
-    await render_catalog_item(message, 0, is_admin=is_admin, replace=False, photo_idx=0)
+    await render_catalog_item(message, 0, is_admin=is_admin, replace=False, photo_idx=0, force_refresh=True)
 
 
 @dp.callback_query(F.data == "noop")
@@ -665,7 +843,7 @@ async def callback_catalog_addpic(callback: types.CallbackQuery):
         return
 
     idx = int(callback.data.split(":")[1])
-    catalog = get_catalog()
+    catalog = await fetch_synced_catalog(force=True)
     if 0 <= idx < len(catalog):
         admin_wait_photo_idx = idx
         item_name = html.escape(catalog[idx]["name"])
@@ -684,11 +862,11 @@ async def callback_catalog_delete(callback: types.CallbackQuery):
         return
 
     idx = int(callback.data.split(":")[1])
-    catalog = get_catalog()
+    catalog = await fetch_synced_catalog(force=True)
     if 0 <= idx < len(catalog):
         removed = catalog.pop(idx)
-        save_catalog(catalog)
-        await callback.answer(f"🗑 Удалено: {removed['name']}")
+        await save_synced_catalog(catalog, f"Delete product from bot: {removed['name']}")
+        await callback.answer(f"🗑 Удалено на сайте и в боте: {removed['name']}")
     else:
         await callback.answer("Товар уже удален")
 
@@ -698,7 +876,7 @@ async def callback_catalog_delete(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("cat_buy:"))
 async def callback_catalog_buy(callback: types.CallbackQuery):
     idx = int(callback.data.split(":")[1])
-    catalog = get_catalog()
+    catalog = await fetch_synced_catalog()
     if not catalog or idx >= len(catalog):
         await callback.answer("Товар больше не доступен", show_alert=True)
         return
@@ -724,12 +902,13 @@ async def callback_catalog_buy(callback: types.CallbackQuery):
 async def callback_catalog_size(callback: types.CallbackQuery):
     _, idx_str, size = callback.data.split(":")
     idx = int(idx_str)
-    catalog = get_catalog()
+    catalog = await fetch_synced_catalog()
     if not catalog or idx >= len(catalog):
         await callback.answer("Товар больше не доступен", show_alert=True)
         return
 
     item = catalog[idx]
+    price_str = format_price_str(item["price"])
     order_id = str(random.randint(1000, 9999))
     user = callback.from_user
 
@@ -741,7 +920,7 @@ async def callback_catalog_size(callback: types.CallbackQuery):
         f"🛍 <b>НОВЫЙ ЗАКАЗ ИЗ БОТА #{order_id}</b>\n\n"
         f"• Товар: <b>{html.escape(item['name'])}</b>\n"
         f"• Размер: <b>{html.escape(size)}</b>\n"
-        f"• Сумма: <b>{html.escape(item['price'])}</b>\n\n"
+        f"• Сумма: <b>{price_str}</b>\n\n"
         f"👤 Покупатель: {html.escape(user.full_name)} ({username})\n"
         f"ID клиента: <code>{user.id}</code>",
         parse_mode="HTML",
@@ -754,7 +933,7 @@ async def callback_catalog_size(callback: types.CallbackQuery):
         await callback.message.edit_text(
             f"✅ <b>Заказ #{order_id} оформлен!</b>\n"
             f"Товар: {html.escape(item['name'])} (размер <b>{html.escape(size)}</b>)\n"
-            f"Сумма к оплате (нажмите, чтобы скопировать): <code>{html.escape(item['price'])}</code>",
+            f"Сумма к оплате (нажмите, чтобы скопировать): <code>{price_str}</code>",
             parse_mode="HTML"
         )
 
