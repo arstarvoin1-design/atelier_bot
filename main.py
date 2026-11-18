@@ -13,6 +13,7 @@ from aiogram.types import (
     InlineKeyboardButton,
     WebAppInfo,
     MenuButtonWebApp,
+    FSInputFile,
 )
 
 # ================= НАСТРОЙКИ МАГАЗИНА =================
@@ -20,20 +21,25 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 5100544808
 SHOP_NAME = "ATELIER"
 
-# Ссылка на сайт (оставь пустой "", пока не выложим сайт; потом впишешь https://...)
+# Ссылка на сайт (оставь "", пока не выложим сайт; потом впишешь https://...)
 SITE_URL = ""
 
 # Канал бренда для проверки подписки за промокод (например "@atelier_brand" или оставь "")
 CHANNEL_USERNAME = ""
 PROMO_CODE = "ATELIER10"
 
+# Твоя прямая ссылка СБП и имя файла с QR-кодом
+PAYMENT_URL = "https://t.tb.ru/c2c-qr-choose-bank?requisiteNumber=+79050090209&bankCode=100000000004"
+QR_IMAGE_PATH = "qr.jpg"
+
 # Твои реквизиты для оплаты:
 PAYMENT_TEXT = (
-    "💳 <b>Реквизиты для оплаты (СБП / Перевод):</b>\n\n"
-    "• <b>Банк:</b> Т-Банк (Тинькофф) / Сбербанк\n"
-    "• <b>Номер телефона:</b> <code>+7 (905) 009-02-09</code>\n"
+    "💳 <b>Оплата через СБП (без комиссии):</b>\n\n"
+    "• <b>Банк:</b> Т-Банк / Сбербанк\n"
+    "• <b>Телефон (нажмите, чтобы скопировать):</b>\n"
+    "<code>+79050090209</code>\n"
     "• <b>Получатель:</b> Арсен Е.\n\n"
-    "📸 <i>После перевода отправьте скриншот чека прямо в этот чат — мы сразу подтвердим оплату и передадим заказ на сборку!</i>"
+    "📲 <i>Нажмите кнопку «Перейти к оплате (СБП)» ниже, отсканируйте QR-код или переведите по номеру телефона. После перевода отправьте скриншот чека в этот чат!</i>"
 )
 
 DELIVERY_TEXT = (
@@ -53,7 +59,7 @@ SIZE_GUIDE_TEXT = (
     "💡 <i>Вещи имеют свободный оверсайз-крой. Если сомневаетесь между двумя размерами — напишите свой рост и вес менеджеру, мы точно подскажем!</i>"
 )
 
-# Мини-каталог товаров в боте (можешь менять названия, цены, размеры и ссылки на фото)
+# Мини-каталог товаров в боте
 CATALOG = [
     {
         "name": "Худи ATELIER Heavyweight Black",
@@ -87,7 +93,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
-# --- Работа с базой пользователей и заказов (JSON) ---
 def load_json(filename, default):
     if os.path.exists(filename):
         try:
@@ -121,17 +126,24 @@ def get_order_client(order_id: str):
     return orders.get(str(order_id))
 
 
-# --- Клавиатуры ---
 def get_main_keyboard() -> ReplyKeyboardMarkup:
     rows = []
     if SITE_URL.startswith("https://"):
         rows.append([KeyboardButton(text="🛍 Открыть магазин", web_app=WebAppInfo(url=SITE_URL))])
     rows.extend([
         [KeyboardButton(text="👕 Каталог"), KeyboardButton(text="📏 Таблица размеров")],
-        [KeyboardButton(text="💳 Реквизиты для оплаты"), KeyboardButton(text="🚚 Доставка и возврат")],
+        [KeyboardButton(text="💳 Оплата СБП"), KeyboardButton(text="🚚 Доставка и возврат")],
         [KeyboardButton(text="🎁 Промокод"), KeyboardButton(text="💬 Написать менеджеру")],
     ])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def get_payment_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    if PAYMENT_URL:
+        buttons.append([InlineKeyboardButton(text="💸 Перейти к оплате (СБП)", url=PAYMENT_URL)])
+    buttons.append([InlineKeyboardButton(text="📎 Я оплатил (отправить чек)", callback_data="send_receipt")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def get_catalog_keyboard(index: int) -> InlineKeyboardMarkup:
@@ -163,7 +175,34 @@ def get_order_admin_keyboard(order_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-# 1. Команда /start (и переход с сайта с номером заказа)
+# Отправка QR-кода, ссылки СБП и реквизитов
+async def send_sbp_payment(chat_id: int, prefix_text: str = ""):
+    full_text = f"{prefix_text}\n\n{PAYMENT_TEXT}".strip()
+    kb = get_payment_keyboard()
+
+    if QR_IMAGE_PATH and os.path.exists(QR_IMAGE_PATH):
+        try:
+            photo = FSInputFile(QR_IMAGE_PATH)
+            await bot.send_photo(
+                chat_id=chat_id,
+                photo=photo,
+                caption=full_text,
+                parse_mode="HTML",
+                reply_markup=kb
+            )
+            return
+        except Exception as e:
+            logging.warning(f"Не удалось отправить QR-фото: {e}")
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=full_text,
+        parse_mode="HTML",
+        reply_markup=kb
+    )
+
+
+# 1. Команда /start
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject):
     user_id = message.from_user.id
@@ -173,9 +212,9 @@ async def cmd_start(message: types.Message, command: CommandObject):
         await message.answer(
             f"👋 Привет, Арсен! Бот магазина <b>{SHOP_NAME}</b> работает в облаке 24/7.\n\n"
             "<b>Твои команды владельца:</b>\n"
-            "• <code>/stats</code> — сколько клиентов и заказов в базе\n"
-            "• <code>/send текст</code> — рассылка всем пользователям бота (можно также ответить <code>/send</code> на любое фото с подписью)\n"
-            "• <b>Ответить (Reply)</b> на карточку клиента — отправить ответ покупателю от имени магазина.",
+            "• <code>/stats</code> — статистика клиентов и заказов\n"
+            "• <code>/send текст</code> — рассылка всем пользователям (или ответь <code>/send</code> на фото)\n"
+            "• <b>Ответить (Reply)</b> на карточку клиента — написать покупателю от имени магазина.",
             parse_mode="HTML",
             reply_markup=get_main_keyboard()
         )
@@ -186,12 +225,13 @@ async def cmd_start(message: types.Message, command: CommandObject):
         order_num = html.escape(args.split("_")[1])
         link_order_to_client(order_num, user_id)
         await message.answer(
-            f"👋 Добро пожаловать в <b>{SHOP_NAME}</b>!\n\n"
-            f"Мы связали ваш <b>Заказ #{order_num}</b> с этим чатом — сюда придут уведомления об оплате и отправке.\n\n"
-            f"{PAYMENT_TEXT}",
+            f"👋 Добро пожаловать в <b>{SHOP_NAME}</b>!\n"
+            f"Мы привязали ваш <b>Заказ #{order_num}</b> к этому чату.",
             parse_mode="HTML",
             reply_markup=get_main_keyboard()
         )
+        await send_sbp_payment(user_id)
+
         username = f"@{message.from_user.username}" if message.from_user.username else html.escape(message.from_user.full_name)
         await bot.send_message(
             ADMIN_ID,
@@ -201,13 +241,13 @@ async def cmd_start(message: types.Message, command: CommandObject):
     else:
         await message.answer(
             f"👋 Добро пожаловать в официальный бот магазина <b>{SHOP_NAME}</b>!\n\n"
-            "Здесь можно посмотреть каталог, подобрать размер, оплатить заказ или задать вопрос менеджеру. Выберите нужный раздел в меню ниже 👇",
+            "Здесь можно посмотреть каталог, подобрать размер, оплатить заказ по СБП или задать вопрос менеджеру 👇",
             parse_mode="HTML",
             reply_markup=get_main_keyboard()
         )
 
 
-# 2. Админ-команды: статистика и рассылка
+# 2. Админ-команды
 @dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
 async def cmd_stats(message: types.Message):
     users = load_json(USERS_FILE, [])
@@ -257,9 +297,19 @@ async def cmd_broadcast(message: types.Message):
 
 
 # 3. Кнопки меню покупателя
-@dp.message(F.text == "💳 Реквизиты для оплаты")
+@dp.message(F.text.in_({"💳 Оплата СБП", "💳 Реквизиты для оплаты"}))
 async def send_payment_info(message: types.Message):
-    await message.answer(PAYMENT_TEXT, parse_mode="HTML")
+    await send_sbp_payment(message.chat.id)
+
+
+@dp.callback_query(F.data == "send_receipt")
+async def callback_send_receipt(callback: types.CallbackQuery):
+    await callback.message.answer(
+        "📸 <b>Отправьте скриншот или PDF-чек об оплате прямо в этот чат.</b>\n\n"
+        "Мы сразу проверим поступление и передадим ваш заказ на сборку!",
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 
 @dp.message(F.text == "🚚 Доставка и возврат")
@@ -328,7 +378,7 @@ async def callback_check_sub(callback: types.CallbackQuery):
     await callback.answer("Вы пока не подписались на канал 😔", show_alert=True)
 
 
-# 5. Мини-каталог прямо в боте
+# 5. Мини-каталог в боте
 def format_product_caption(item: dict) -> str:
     sizes_str = ", ".join(item["sizes"])
     return (
@@ -422,7 +472,6 @@ async def callback_catalog_size(callback: types.CallbackQuery):
     link_order_to_client(order_id, user.id)
     username = f"@{user.username}" if user.username else "скрыт"
 
-    # Отправляем карточку заказа админу
     await bot.send_message(
         ADMIN_ID,
         f"🛍 <b>НОВЫЙ ЗАКАЗ ИЗ БОТА #{order_id}</b>\n\n"
@@ -435,18 +484,18 @@ async def callback_catalog_size(callback: types.CallbackQuery):
         reply_markup=get_order_admin_keyboard(order_id)
     )
 
-    confirm_text = (
-        f"✅ <b>Заказ #{order_id} оформлен!</b>\n\n"
-        f"• Товар: {html.escape(item['name'])} (размер <b>{html.escape(size)}</b>)\n"
-        f"• К оплате: <b>{html.escape(item['price'])}</b>\n\n"
-        f"{PAYMENT_TEXT}"
-    )
     if callback.message.photo:
         await callback.message.delete()
-        await callback.message.answer(confirm_text, parse_mode="HTML")
     else:
-        await callback.message.edit_text(confirm_text, parse_mode="HTML")
-    await callback.answer("Заказ передан менеджеру!")
+        await callback.message.edit_text(
+            f"✅ <b>Заказ #{order_id} оформлен!</b>\n"
+            f"Товар: {html.escape(item['name'])} (размер <b>{html.escape(size)}</b>)\n"
+            f"Сумма к оплате (нажмите, чтобы скопировать): <code>{html.escape(item['price'])}</code>",
+            parse_mode="HTML"
+        )
+
+    await send_sbp_payment(user.id)
+    await callback.answer("Заказ оформлен!")
 
 
 # 6. Ответ админа клиенту через Reply
@@ -503,7 +552,7 @@ async def forward_client_message(message: types.Message):
     )
 
 
-# 8. Кнопки управления статусом заказа + уведомление покупателю
+# 8. Управление статусом заказа + авто-уведомление покупателю
 @dp.callback_query(F.data.startswith(("ord:", "order_")))
 async def handle_order_status(callback: types.CallbackQuery):
     if ":" in callback.data:
@@ -520,7 +569,8 @@ async def handle_order_status(callback: types.CallbackQuery):
     if action == "pay":
         await callback.message.reply(
             f"📋 <b>Реквизиты для заказа #{html.escape(order_id)}:</b>\n\n{PAYMENT_TEXT}",
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_payment_keyboard()
         )
         await callback.answer("Реквизиты отправлены в чат")
         return
@@ -541,12 +591,11 @@ async def handle_order_status(callback: types.CallbackQuery):
         reply_markup=callback.message.reply_markup
     )
 
-    # Отправляем автоматическое уведомление покупателю, если он связан с заказом
     client_id = get_order_client(order_id)
     if client_id and client_notice:
         try:
             await bot.send_message(client_id, client_notice, parse_mode="HTML")
-            await callback.answer(f"Статус обновлен, клиент уведомлен!")
+            await callback.answer("Статус обновлен, клиент уведомлен!")
             return
         except Exception:
             pass
@@ -555,7 +604,6 @@ async def handle_order_status(callback: types.CallbackQuery):
 
 
 async def main():
-    # Если указана ссылка на сайт, ставим кнопку открытия магазина в меню Telegram
     if SITE_URL.startswith("https://"):
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(text="🛍 Магазин", web_app=WebAppInfo(url=SITE_URL))
