@@ -14,6 +14,7 @@ from aiogram.types import (
     WebAppInfo,
     MenuButtonWebApp,
     FSInputFile,
+    InputMediaPhoto,
 )
 
 # ================= НАСТРОЙКИ МАГАЗИНА =================
@@ -21,7 +22,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = 5100544808
 SHOP_NAME = "ATELIER"
 
-# Ссылка на сайт (оставь "", пока не выложим сайт; потом впишешь https://...)
+# Ссылка на сайт (впишешь сюда https://arstarvoin1-design.github.io/atelier-shop/, когда выложим сайт)
 SITE_URL = ""
 
 # Канал бренда для проверки подписки за промокод (например "@atelier_brand" или оставь "")
@@ -66,21 +67,21 @@ DEFAULT_CATALOG = [
         "price": "5 900 ₽",
         "sizes": ["S", "M", "L", "XL"],
         "desc": "Плотный футер 460 г/м², 100% хлопок, объемный капюшон и спущенное плечо.",
-        "photo": ""
+        "photos": []
     },
     {
         "name": "Футболка ATELIER Boxy Fit White",
         "price": "2 900 ₽",
         "sizes": ["S", "M", "L", "XL"],
         "desc": "Плотный хлопок 260 г/м², не просвечивает, держит форму после стирок.",
-        "photo": ""
+        "photos": []
     },
     {
         "name": "Свитшот ATELIER Graphite",
         "price": "4 800 ₽",
         "sizes": ["M", "L", "XL"],
         "desc": "Свободный крой, мягкий начес внутри, минималистичная вышивка в тон.",
-        "photo": ""
+        "photos": []
     }
 ]
 # ======================================================
@@ -92,6 +93,10 @@ CATALOG_FILE = "catalog.json"
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
+
+# Временное состояние для загрузки альбомов и добавления фото к товару
+media_groups_buffer: dict[str, dict] = {}
+admin_wait_photo_idx: int | None = None
 
 
 def load_json(filename, default):
@@ -113,7 +118,13 @@ def get_catalog() -> list:
     if not os.path.exists(CATALOG_FILE):
         save_json(CATALOG_FILE, DEFAULT_CATALOG)
         return list(DEFAULT_CATALOG)
-    return load_json(CATALOG_FILE, [])
+    items = load_json(CATALOG_FILE, [])
+    # Совместимость со старыми товарами, где было поле "photo" вместо "photos"
+    for item in items:
+        if "photos" not in item:
+            old_photo = item.pop("photo", "")
+            item["photos"] = [old_photo] if old_photo else []
+    return items
 
 
 def save_catalog(items: list):
@@ -158,21 +169,34 @@ def get_payment_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def get_catalog_keyboard(index: int, total: int, is_admin: bool = False) -> InlineKeyboardMarkup:
+def get_catalog_keyboard(index: int, total: int, photo_idx: int = 0, photos_count: int = 0, is_admin: bool = False) -> InlineKeyboardMarkup:
     prev_idx = (index - 1) % total
     next_idx = (index + 1) % total
-    buttons = [
-        [InlineKeyboardButton(text="🛒 Заказать эту вещь", callback_data=f"cat_buy:{index}")],
-    ]
+    buttons = []
+
+    # Если у товара 2 и более фото — добавляем кнопку переключения ракурсов
+    if photos_count > 1:
+        next_photo = (photo_idx + 1) % photos_count
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"📸 Фото {photo_idx + 1}/{photos_count} • Следующее фото ➡️",
+                callback_data=f"cat_pic:{index}:{next_photo}"
+            )
+        ])
+
+    buttons.append([InlineKeyboardButton(text="🛒 Заказать эту вещь", callback_data=f"cat_buy:{index}")])
+
     if total > 1:
         buttons.append([
             InlineKeyboardButton(text="⬅️", callback_data=f"cat_nav:{prev_idx}"),
-            InlineKeyboardButton(text=f"{index + 1} / {total}", callback_data="noop"),
+            InlineKeyboardButton(text=f"Товар {index + 1} / {total}", callback_data="noop"),
             InlineKeyboardButton(text="➡️", callback_data=f"cat_nav:{next_idx}"),
         ])
+
     if is_admin:
         buttons.append([
-            InlineKeyboardButton(text="🗑 Удалить этот товар", callback_data=f"cat_del:{index}")
+            InlineKeyboardButton(text="📸 + Фото", callback_data=f"cat_addpic:{index}"),
+            InlineKeyboardButton(text="🗑 Удалить", callback_data=f"cat_del:{index}")
         ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -217,6 +241,73 @@ async def send_sbp_payment(chat_id: int, prefix_text: str = ""):
     )
 
 
+# Вспомогательная функция создания товара из команды /add
+async def create_product_from_raw(target_message: types.Message, raw_text: str, photo_ids: list[str]):
+    payload = raw_text.partition(" ")[2].strip()
+    if not payload:
+        await target_message.answer(
+            "➕ <b>Как добавить товар в каталог:</b>\n\n"
+            "Отправь <b>1 фото или целый альбом</b> и в подписи напиши:\n"
+            "<code>/add Худи ATELIER Black | 5 900 ₽ | S, M, L, XL | Плотный футер 460 г/м²</code>\n\n"
+            "<i>Разделитель — вертикальная черта <code>|</code>. Чтобы добавить фото к уже существующей вещи, открой «👕 Каталог» и нажми «📸 + Фото».</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    parts = [p.strip() for p in payload.split("|")]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        await target_message.answer(
+            "⚠️ Укажи минимум <b>название</b> и <b>цену</b> через символ <code>|</code>.\n"
+            "Пример: <code>/add Футболка White | 2 900 ₽ | S, M, L | Хлопок 260 г/м²</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    name = parts[0]
+    price = parts[1]
+    sizes = [s.strip() for s in parts[2].split(",") if s.strip()] if len(parts) > 2 and parts[2] else ["S", "M", "L", "XL"]
+    desc = parts[3] if len(parts) > 3 else ""
+
+    catalog = get_catalog()
+    catalog.append({
+        "name": name,
+        "price": price,
+        "sizes": sizes,
+        "desc": desc,
+        "photos": photo_ids
+    })
+    save_catalog(catalog)
+
+    photo_status = f"фото: {len(photo_ids)} шт. ✅" if photo_ids else "без фото"
+    await target_message.answer(
+        f"✅ <b>Товар добавлен в каталог ({photo_status})!</b>\n\n"
+        f"• Название: <b>{html.escape(name)}</b>\n"
+        f"• Цена: <b>{html.escape(price)}</b>\n"
+        f"• Размеры: <b>{html.escape(', '.join(sizes))}</b>\n"
+        f"• Всего позиций в каталоге: <b>{len(catalog)}</b>",
+        parse_mode="HTML"
+    )
+
+
+async def append_photos_to_product(target_message: types.Message, idx: int, new_photos: list[str]):
+    global admin_wait_photo_idx
+    catalog = get_catalog()
+    if 0 <= idx < len(catalog):
+        catalog[idx].setdefault("photos", []).extend(new_photos)
+        save_catalog(catalog)
+        total_pics = len(catalog[idx]["photos"])
+        item_name = html.escape(catalog[idx]["name"])
+        admin_wait_photo_idx = None
+        await target_message.answer(
+            f"✅ Добавлено фото: <b>{len(new_photos)} шт.</b>\n"
+            f"Теперь у товара <b>«{item_name}»</b> всего <b>{total_pics} фото</b>!",
+            parse_mode="HTML"
+        )
+    else:
+        admin_wait_photo_idx = None
+        await target_message.answer("⚠️ Товар не найден, режим добавления фото сброшен.")
+
+
 # 1. Команда /start
 @dp.message(CommandStart())
 async def cmd_start(message: types.Message, command: CommandObject):
@@ -227,8 +318,8 @@ async def cmd_start(message: types.Message, command: CommandObject):
         await message.answer(
             f"👋 Привет, Арсен! Бот магазина <b>{SHOP_NAME}</b> работает в облаке 24/7.\n\n"
             "<b>Твои команды владельца:</b>\n"
-            "• <code>/add Название | Цена | Размеры | Описание</code> — добавить товар в каталог (прикрепи фото или ответь на фото)\n"
-            "• <b>👕 Каталог</b> → кнопка <b>🗑 Удалить этот товар</b> — убрать вещь с витрины\n"
+            "• <code>/add Название | Цена | Размеры | Описание</code> — добавить товар (можно прикрепить сразу альбом из нескольких фото)\n"
+            "• <b>👕 Каталог</b> → кнопки <b>📸 + Фото</b> и <b>🗑 Удалить</b> под каждым товаром\n"
             "• <code>/stats</code> — статистика клиентов и заказов\n"
             "• <code>/send текст</code> — рассылка всем пользователям (или ответь <code>/send</code> на фото)\n"
             "• <b>Ответить (Reply)</b> на карточку клиента — написать покупателю от имени магазина.",
@@ -264,61 +355,58 @@ async def cmd_start(message: types.Message, command: CommandObject):
         )
 
 
-# 2. Админ-команды: добавление товара, статистика и рассылка
+# 2. Обработка альбомов (media_group_id) от админа для /add или добавления фото к товару
+async def finalize_media_group(mg_id: str):
+    await asyncio.sleep(0.8)
+    data = media_groups_buffer.pop(mg_id, None)
+    if not data:
+        return
+
+    caption = data["caption"].strip()
+    photos = data["photos"]
+    msg = data["message"]
+
+    if caption.startswith("/add"):
+        await create_product_from_raw(msg, caption, photos)
+    elif admin_wait_photo_idx is not None:
+        await append_photos_to_product(msg, admin_wait_photo_idx, photos)
+
+
+@dp.message(F.from_user.id == ADMIN_ID, F.media_group_id, F.photo)
+async def handle_admin_album(message: types.Message):
+    mg_id = message.media_group_id
+    if mg_id not in media_groups_buffer:
+        media_groups_buffer[mg_id] = {
+            "photos": [],
+            "caption": "",
+            "message": message,
+        }
+        asyncio.create_task(finalize_media_group(mg_id))
+
+    media_groups_buffer[mg_id]["photos"].append(message.photo[-1].file_id)
+    if message.caption:
+        media_groups_buffer[mg_id]["caption"] = message.caption
+        media_groups_buffer[mg_id]["message"] = message
+
+
+# 3. Админ-команды: добавление товара (1 фото или текст), отмена, статистика, рассылка
+@dp.message(Command("cancel"), F.from_user.id == ADMIN_ID)
+async def cmd_cancel_admin(message: types.Message):
+    global admin_wait_photo_idx
+    admin_wait_photo_idx = None
+    await message.answer("👌 Режим ожидания фото отменен.")
+
+
 @dp.message(Command("add"), F.from_user.id == ADMIN_ID)
 async def cmd_add_product(message: types.Message):
     raw_text = (message.text or message.caption or "").strip()
-    payload = raw_text.partition(" ")[2].strip()
-
-    if not payload:
-        await message.answer(
-            "➕ <b>Как добавить товар в каталог:</b>\n\n"
-            "Отправь <b>фото вещи</b> и в подписи к нему напиши:\n"
-            "<code>/add Худи ATELIER Black | 5 900 ₽ | S, M, L, XL | Плотный футер 460 г/м²</code>\n\n"
-            "<i>Разделитель — вертикальная черта <code>|</code>. Можно также отправить без фото или ответить этой командой на уже загруженное фото.</i>",
-            parse_mode="HTML"
-        )
-        return
-
-    parts = [p.strip() for p in payload.split("|")]
-    if len(parts) < 2 or not parts[0] or not parts[1]:
-        await message.answer(
-            "⚠️ Укажи минимум <b>название</b> и <b>цену</b> через символ <code>|</code>.\n"
-            "Пример: <code>/add Футболка White | 2 900 ₽ | S, M, L | Хлопок 260 г/м²</code>",
-            parse_mode="HTML"
-        )
-        return
-
-    name = parts[0]
-    price = parts[1]
-    sizes = [s.strip() for s in parts[2].split(",") if s.strip()] if len(parts) > 2 and parts[2] else ["S", "M", "L", "XL"]
-    desc = parts[3] if len(parts) > 3 else ""
-
-    photo_id = ""
+    photo_ids = []
     if message.photo:
-        photo_id = message.photo[-1].file_id
+        photo_ids.append(message.photo[-1].file_id)
     elif message.reply_to_message and message.reply_to_message.photo:
-        photo_id = message.reply_to_message.photo[-1].file_id
+        photo_ids.append(message.reply_to_message.photo[-1].file_id)
 
-    catalog = get_catalog()
-    catalog.append({
-        "name": name,
-        "price": price,
-        "sizes": sizes,
-        "desc": desc,
-        "photo": photo_id
-    })
-    save_catalog(catalog)
-
-    photo_status = "с фото ✅" if photo_id else "без фото (текстовая карточка)"
-    await message.answer(
-        f"✅ <b>Товар добавлен в каталог ({photo_status})!</b>\n\n"
-        f"• Название: <b>{html.escape(name)}</b>\n"
-        f"• Цена: <b>{html.escape(price)}</b>\n"
-        f"• Размеры: <b>{html.escape(', '.join(sizes))}</b>\n"
-        f"• Всего позиций в каталоге: <b>{len(catalog)}</b>",
-        parse_mode="HTML"
-    )
+    await create_product_from_raw(message, raw_text, photo_ids)
 
 
 @dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
@@ -371,7 +459,7 @@ async def cmd_broadcast(message: types.Message):
     await message.answer(f"✅ Рассылка завершена! Доставлено покупателям: <b>{sent_count}</b>.", parse_mode="HTML")
 
 
-# 3. Кнопки меню покупателя
+# 4. Кнопки меню покупателя
 @dp.message(F.text.in_({"💳 Оплата СБП", "💳 Реквизиты для оплаты"}))
 async def send_payment_info(message: types.Message):
     await send_sbp_payment(message.chat.id)
@@ -404,7 +492,7 @@ async def contact_manager(message: types.Message):
     )
 
 
-# 4. Промокод за подписку
+# 5. Промокод за подписку
 @dp.message(F.text == "🎁 Промокод")
 async def send_promo(message: types.Message):
     if not CHANNEL_USERNAME:
@@ -453,7 +541,7 @@ async def callback_check_sub(callback: types.CallbackQuery):
     await callback.answer("Вы пока не подписались на канал 😔", show_alert=True)
 
 
-# 5. Мини-каталог в боте (с добавлением и удалением товаров)
+# 6. Мини-каталог с переключением нескольких фото, добавлением и удалением
 def format_product_caption(item: dict) -> str:
     sizes_str = ", ".join(item.get("sizes", []))
     desc_block = f"\n\n{html.escape(item['desc'])}" if item.get("desc") else ""
@@ -465,7 +553,13 @@ def format_product_caption(item: dict) -> str:
     )
 
 
-async def render_catalog_item(target_message: types.Message, idx: int, is_admin: bool, replace: bool = False):
+async def render_catalog_item(
+    target_message: types.Message,
+    idx: int,
+    is_admin: bool,
+    replace: bool = False,
+    photo_idx: int = 0
+):
     catalog = get_catalog()
     if not catalog:
         empty_text = "🛍 Каталог пока пуст. Новые позиции скоро появятся!"
@@ -481,18 +575,39 @@ async def render_catalog_item(target_message: types.Message, idx: int, is_admin:
 
     idx = idx % len(catalog)
     item = catalog[idx]
+    photos = item.get("photos", [])
+    photo_idx = photo_idx % len(photos) if photos else 0
+    current_photo = photos[photo_idx] if photos else None
+
     caption = format_product_caption(item)
-    kb = get_catalog_keyboard(idx, len(catalog), is_admin=is_admin)
+    kb = get_catalog_keyboard(
+        idx,
+        len(catalog),
+        photo_idx=photo_idx,
+        photos_count=len(photos),
+        is_admin=is_admin
+    )
 
     if replace:
-        if target_message.photo or item.get("photo"):
+        # Если и старое, и новое сообщение с фото — плавно меняем картинку без мигания
+        if target_message.photo and current_photo:
+            try:
+                await target_message.edit_media(
+                    media=InputMediaPhoto(media=current_photo, caption=caption, parse_mode="HTML"),
+                    reply_markup=kb
+                )
+                return
+            except Exception:
+                pass
+
+        if target_message.photo or current_photo:
             try:
                 await target_message.delete()
             except Exception:
                 pass
-            if item.get("photo"):
+            if current_photo:
                 try:
-                    await target_message.answer_photo(photo=item["photo"], caption=caption, parse_mode="HTML", reply_markup=kb)
+                    await target_message.answer_photo(photo=current_photo, caption=caption, parse_mode="HTML", reply_markup=kb)
                     return
                 except Exception:
                     pass
@@ -500,9 +615,9 @@ async def render_catalog_item(target_message: types.Message, idx: int, is_admin:
         else:
             await target_message.edit_text(caption, parse_mode="HTML", reply_markup=kb)
     else:
-        if item.get("photo"):
+        if current_photo:
             try:
-                await target_message.answer_photo(photo=item["photo"], caption=caption, parse_mode="HTML", reply_markup=kb)
+                await target_message.answer_photo(photo=current_photo, caption=caption, parse_mode="HTML", reply_markup=kb)
                 return
             except Exception:
                 pass
@@ -512,7 +627,7 @@ async def render_catalog_item(target_message: types.Message, idx: int, is_admin:
 @dp.message(F.text == "👕 Каталог")
 async def show_catalog(message: types.Message):
     is_admin = (message.from_user.id == ADMIN_ID)
-    await render_catalog_item(message, 0, is_admin=is_admin, replace=False)
+    await render_catalog_item(message, 0, is_admin=is_admin, replace=False, photo_idx=0)
 
 
 @dp.callback_query(F.data == "noop")
@@ -524,7 +639,41 @@ async def callback_noop(callback: types.CallbackQuery):
 async def callback_catalog_nav(callback: types.CallbackQuery):
     idx = int(callback.data.split(":")[1])
     is_admin = (callback.from_user.id == ADMIN_ID)
-    await render_catalog_item(callback.message, idx, is_admin=is_admin, replace=True)
+    await render_catalog_item(callback.message, idx, is_admin=is_admin, replace=True, photo_idx=0)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cat_pic:"))
+async def callback_catalog_pic(callback: types.CallbackQuery):
+    _, idx_str, pic_str = callback.data.split(":")
+    is_admin = (callback.from_user.id == ADMIN_ID)
+    await render_catalog_item(
+        callback.message,
+        int(idx_str),
+        is_admin=is_admin,
+        replace=True,
+        photo_idx=int(pic_str)
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cat_addpic:"))
+async def callback_catalog_addpic(callback: types.CallbackQuery):
+    global admin_wait_photo_idx
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    idx = int(callback.data.split(":")[1])
+    catalog = get_catalog()
+    if 0 <= idx < len(catalog):
+        admin_wait_photo_idx = idx
+        item_name = html.escape(catalog[idx]["name"])
+        await callback.message.answer(
+            f"📸 Отправь в этот чат <b>1 фото или целый альбом</b> для товара <b>«{item_name}»</b> (подпись не нужна).\n\n"
+            "<i>Для отмены нажми /cancel</i>",
+            parse_mode="HTML"
+        )
     await callback.answer()
 
 
@@ -543,7 +692,7 @@ async def callback_catalog_delete(callback: types.CallbackQuery):
     else:
         await callback.answer("Товар уже удален")
 
-    await render_catalog_item(callback.message, idx, is_admin=True, replace=True)
+    await render_catalog_item(callback.message, idx, is_admin=True, replace=True, photo_idx=0)
 
 
 @dp.callback_query(F.data.startswith("cat_buy:"))
@@ -613,7 +762,7 @@ async def callback_catalog_size(callback: types.CallbackQuery):
     await callback.answer("Заказ оформлен!")
 
 
-# 6. Ответ админа клиенту через Reply
+# 7. Ответ админа клиенту через Reply + прием одиночного фото при нажатии "📸 + Фото"
 @dp.message(F.from_user.id == ADMIN_ID, F.reply_to_message)
 async def reply_to_client(message: types.Message):
     replied = message.reply_to_message
@@ -644,7 +793,20 @@ async def reply_to_client(message: types.Message):
         )
 
 
-# 7. Пересылка сообщений и чеков от покупателей админу
+@dp.message(F.from_user.id == ADMIN_ID, F.photo)
+async def handle_admin_single_photo(message: types.Message):
+    if admin_wait_photo_idx is not None:
+        await append_photos_to_product(message, admin_wait_photo_idx, [message.photo[-1].file_id])
+    else:
+        await message.answer(
+            "ℹ️ Если хочешь создать новый товар с этим фото — ответь на него командой:\n"
+            "<code>/add Название | Цена | S, M, L | Описание</code>\n\n"
+            "А если хочешь добавить фото к существующей вещи — открой <b>👕 Каталог</b> и нажми <b>📸 + Фото</b>.",
+            parse_mode="HTML"
+        )
+
+
+# 8. Пересылка сообщений и чеков от покупателей админу
 @dp.message(F.from_user.id != ADMIN_ID)
 async def forward_client_message(message: types.Message):
     user = message.from_user
@@ -667,7 +829,7 @@ async def forward_client_message(message: types.Message):
     )
 
 
-# 8. Управление статусом заказа + авто-уведомление покупателю
+# 9. Управление статусом заказа + авто-уведомление покупателю
 @dp.callback_query(F.data.startswith(("ord:", "order_")))
 async def handle_order_status(callback: types.CallbackQuery):
     if ":" in callback.data:
