@@ -59,8 +59,8 @@ SIZE_GUIDE_TEXT = (
     "💡 <i>Вещи имеют свободный оверсайз-крой. Если сомневаетесь между двумя размерами — напишите свой рост и вес менеджеру, мы точно подскажем!</i>"
 )
 
-# Мини-каталог товаров в боте
-CATALOG = [
+# Стартовые товары (загрузятся при первом запуске, дальше всё хранится в catalog.json)
+DEFAULT_CATALOG = [
     {
         "name": "Худи ATELIER Heavyweight Black",
         "price": "5 900 ₽",
@@ -87,6 +87,7 @@ CATALOG = [
 
 USERS_FILE = "users.json"
 ORDERS_FILE = "orders.json"
+CATALOG_FILE = "catalog.json"
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN)
@@ -106,6 +107,17 @@ def load_json(filename, default):
 def save_json(filename, data):
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def get_catalog() -> list:
+    if not os.path.exists(CATALOG_FILE):
+        save_json(CATALOG_FILE, DEFAULT_CATALOG)
+        return list(DEFAULT_CATALOG)
+    return load_json(CATALOG_FILE, [])
+
+
+def save_catalog(items: list):
+    save_json(CATALOG_FILE, items)
 
 
 def register_user(user_id: int):
@@ -146,8 +158,7 @@ def get_payment_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def get_catalog_keyboard(index: int) -> InlineKeyboardMarkup:
-    total = len(CATALOG)
+def get_catalog_keyboard(index: int, total: int, is_admin: bool = False) -> InlineKeyboardMarkup:
     prev_idx = (index - 1) % total
     next_idx = (index + 1) % total
     buttons = [
@@ -158,6 +169,10 @@ def get_catalog_keyboard(index: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="⬅️", callback_data=f"cat_nav:{prev_idx}"),
             InlineKeyboardButton(text=f"{index + 1} / {total}", callback_data="noop"),
             InlineKeyboardButton(text="➡️", callback_data=f"cat_nav:{next_idx}"),
+        ])
+    if is_admin:
+        buttons.append([
+            InlineKeyboardButton(text="🗑 Удалить этот товар", callback_data=f"cat_del:{index}")
         ])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
@@ -212,6 +227,8 @@ async def cmd_start(message: types.Message, command: CommandObject):
         await message.answer(
             f"👋 Привет, Арсен! Бот магазина <b>{SHOP_NAME}</b> работает в облаке 24/7.\n\n"
             "<b>Твои команды владельца:</b>\n"
+            "• <code>/add Название | Цена | Размеры | Описание</code> — добавить товар в каталог (прикрепи фото или ответь на фото)\n"
+            "• <b>👕 Каталог</b> → кнопка <b>🗑 Удалить этот товар</b> — убрать вещь с витрины\n"
             "• <code>/stats</code> — статистика клиентов и заказов\n"
             "• <code>/send текст</code> — рассылка всем пользователям (или ответь <code>/send</code> на фото)\n"
             "• <b>Ответить (Reply)</b> на карточку клиента — написать покупателю от имени магазина.",
@@ -247,15 +264,73 @@ async def cmd_start(message: types.Message, command: CommandObject):
         )
 
 
-# 2. Админ-команды
+# 2. Админ-команды: добавление товара, статистика и рассылка
+@dp.message(Command("add"), F.from_user.id == ADMIN_ID)
+async def cmd_add_product(message: types.Message):
+    raw_text = (message.text or message.caption or "").strip()
+    payload = raw_text.partition(" ")[2].strip()
+
+    if not payload:
+        await message.answer(
+            "➕ <b>Как добавить товар в каталог:</b>\n\n"
+            "Отправь <b>фото вещи</b> и в подписи к нему напиши:\n"
+            "<code>/add Худи ATELIER Black | 5 900 ₽ | S, M, L, XL | Плотный футер 460 г/м²</code>\n\n"
+            "<i>Разделитель — вертикальная черта <code>|</code>. Можно также отправить без фото или ответить этой командой на уже загруженное фото.</i>",
+            parse_mode="HTML"
+        )
+        return
+
+    parts = [p.strip() for p in payload.split("|")]
+    if len(parts) < 2 or not parts[0] or not parts[1]:
+        await message.answer(
+            "⚠️ Укажи минимум <b>название</b> и <b>цену</b> через символ <code>|</code>.\n"
+            "Пример: <code>/add Футболка White | 2 900 ₽ | S, M, L | Хлопок 260 г/м²</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    name = parts[0]
+    price = parts[1]
+    sizes = [s.strip() for s in parts[2].split(",") if s.strip()] if len(parts) > 2 and parts[2] else ["S", "M", "L", "XL"]
+    desc = parts[3] if len(parts) > 3 else ""
+
+    photo_id = ""
+    if message.photo:
+        photo_id = message.photo[-1].file_id
+    elif message.reply_to_message and message.reply_to_message.photo:
+        photo_id = message.reply_to_message.photo[-1].file_id
+
+    catalog = get_catalog()
+    catalog.append({
+        "name": name,
+        "price": price,
+        "sizes": sizes,
+        "desc": desc,
+        "photo": photo_id
+    })
+    save_catalog(catalog)
+
+    photo_status = "с фото ✅" if photo_id else "без фото (текстовая карточка)"
+    await message.answer(
+        f"✅ <b>Товар добавлен в каталог ({photo_status})!</b>\n\n"
+        f"• Название: <b>{html.escape(name)}</b>\n"
+        f"• Цена: <b>{html.escape(price)}</b>\n"
+        f"• Размеры: <b>{html.escape(', '.join(sizes))}</b>\n"
+        f"• Всего позиций в каталоге: <b>{len(catalog)}</b>",
+        parse_mode="HTML"
+    )
+
+
 @dp.message(Command("stats"), F.from_user.id == ADMIN_ID)
 async def cmd_stats(message: types.Message):
     users = load_json(USERS_FILE, [])
     orders = load_json(ORDERS_FILE, {})
+    catalog = get_catalog()
     await message.answer(
         f"📊 <b>Статистика {SHOP_NAME}:</b>\n\n"
         f"• Пользователей в боте: <b>{len(users)}</b>\n"
-        f"• Привязанных заказов: <b>{len(orders)}</b>",
+        f"• Привязанных заказов: <b>{len(orders)}</b>\n"
+        f"• Товаров в каталоге: <b>{len(catalog)}</b>",
         parse_mode="HTML"
     )
 
@@ -378,33 +453,66 @@ async def callback_check_sub(callback: types.CallbackQuery):
     await callback.answer("Вы пока не подписались на канал 😔", show_alert=True)
 
 
-# 5. Мини-каталог в боте
+# 5. Мини-каталог в боте (с добавлением и удалением товаров)
 def format_product_caption(item: dict) -> str:
-    sizes_str = ", ".join(item["sizes"])
+    sizes_str = ", ".join(item.get("sizes", []))
+    desc_block = f"\n\n{html.escape(item['desc'])}" if item.get("desc") else ""
     return (
         f"👕 <b>{html.escape(item['name'])}</b>\n\n"
         f"💰 Цена: <b>{html.escape(item['price'])}</b>\n"
-        f"📐 Размеры в наличии: <b>{html.escape(sizes_str)}</b>\n\n"
-        f"{html.escape(item['desc'])}"
+        f"📐 Размеры в наличии: <b>{html.escape(sizes_str)}</b>"
+        f"{desc_block}"
     )
+
+
+async def render_catalog_item(target_message: types.Message, idx: int, is_admin: bool, replace: bool = False):
+    catalog = get_catalog()
+    if not catalog:
+        empty_text = "🛍 Каталог пока пуст. Новые позиции скоро появятся!"
+        if is_admin:
+            empty_text += "\n\n<i>Добавь первый товар командой:</i>\n<code>/add Название | Цена | Размеры | Описание</code>"
+        if replace:
+            try:
+                await target_message.delete()
+            except Exception:
+                pass
+        await target_message.answer(empty_text, parse_mode="HTML")
+        return
+
+    idx = idx % len(catalog)
+    item = catalog[idx]
+    caption = format_product_caption(item)
+    kb = get_catalog_keyboard(idx, len(catalog), is_admin=is_admin)
+
+    if replace:
+        if target_message.photo or item.get("photo"):
+            try:
+                await target_message.delete()
+            except Exception:
+                pass
+            if item.get("photo"):
+                try:
+                    await target_message.answer_photo(photo=item["photo"], caption=caption, parse_mode="HTML", reply_markup=kb)
+                    return
+                except Exception:
+                    pass
+            await target_message.answer(caption, parse_mode="HTML", reply_markup=kb)
+        else:
+            await target_message.edit_text(caption, parse_mode="HTML", reply_markup=kb)
+    else:
+        if item.get("photo"):
+            try:
+                await target_message.answer_photo(photo=item["photo"], caption=caption, parse_mode="HTML", reply_markup=kb)
+                return
+            except Exception:
+                pass
+        await target_message.answer(caption, parse_mode="HTML", reply_markup=kb)
 
 
 @dp.message(F.text == "👕 Каталог")
 async def show_catalog(message: types.Message):
-    if not CATALOG:
-        await message.answer("Каталог скоро обновится!")
-        return
-    item = CATALOG[0]
-    caption = format_product_caption(item)
-    kb = get_catalog_keyboard(0)
-
-    if item.get("photo"):
-        try:
-            await message.answer_photo(photo=item["photo"], caption=caption, parse_mode="HTML", reply_markup=kb)
-            return
-        except Exception:
-            pass
-    await message.answer(caption, parse_mode="HTML", reply_markup=kb)
+    is_admin = (message.from_user.id == ADMIN_ID)
+    await render_catalog_item(message, 0, is_admin=is_admin, replace=False)
 
 
 @dp.callback_query(F.data == "noop")
@@ -415,40 +523,41 @@ async def callback_noop(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("cat_nav:"))
 async def callback_catalog_nav(callback: types.CallbackQuery):
     idx = int(callback.data.split(":")[1])
-    item = CATALOG[idx]
-    caption = format_product_caption(item)
-    kb = get_catalog_keyboard(idx)
-
-    if callback.message.photo:
-        await callback.message.delete()
-        if item.get("photo"):
-            try:
-                await callback.message.answer_photo(photo=item["photo"], caption=caption, parse_mode="HTML", reply_markup=kb)
-                await callback.answer()
-                return
-            except Exception:
-                pass
-        await callback.message.answer(caption, parse_mode="HTML", reply_markup=kb)
-    else:
-        if item.get("photo"):
-            await callback.message.delete()
-            try:
-                await callback.message.answer_photo(photo=item["photo"], caption=caption, parse_mode="HTML", reply_markup=kb)
-                await callback.answer()
-                return
-            except Exception:
-                pass
-        await callback.message.edit_text(caption, parse_mode="HTML", reply_markup=kb)
+    is_admin = (callback.from_user.id == ADMIN_ID)
+    await render_catalog_item(callback.message, idx, is_admin=is_admin, replace=True)
     await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cat_del:"))
+async def callback_catalog_delete(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+
+    idx = int(callback.data.split(":")[1])
+    catalog = get_catalog()
+    if 0 <= idx < len(catalog):
+        removed = catalog.pop(idx)
+        save_catalog(catalog)
+        await callback.answer(f"🗑 Удалено: {removed['name']}")
+    else:
+        await callback.answer("Товар уже удален")
+
+    await render_catalog_item(callback.message, idx, is_admin=True, replace=True)
 
 
 @dp.callback_query(F.data.startswith("cat_buy:"))
 async def callback_catalog_buy(callback: types.CallbackQuery):
     idx = int(callback.data.split(":")[1])
-    item = CATALOG[idx]
+    catalog = get_catalog()
+    if not catalog or idx >= len(catalog):
+        await callback.answer("Товар больше не доступен", show_alert=True)
+        return
+
+    item = catalog[idx]
     size_buttons = [
         InlineKeyboardButton(text=size, callback_data=f"cat_size:{idx}:{size}")
-        for size in item["sizes"]
+        for size in item.get("sizes", ["S", "M", "L"])
     ]
     kb = InlineKeyboardMarkup(inline_keyboard=[
         size_buttons,
@@ -465,7 +574,13 @@ async def callback_catalog_buy(callback: types.CallbackQuery):
 @dp.callback_query(F.data.startswith("cat_size:"))
 async def callback_catalog_size(callback: types.CallbackQuery):
     _, idx_str, size = callback.data.split(":")
-    item = CATALOG[int(idx_str)]
+    idx = int(idx_str)
+    catalog = get_catalog()
+    if not catalog or idx >= len(catalog):
+        await callback.answer("Товар больше не доступен", show_alert=True)
+        return
+
+    item = catalog[idx]
     order_id = str(random.randint(1000, 9999))
     user = callback.from_user
 
