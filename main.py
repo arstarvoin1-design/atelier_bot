@@ -23,7 +23,7 @@ ADMIN_ID = 5100544808
 SHOP_NAME = "ATELIER"
 
 # Ссылка на сайт (впишешь сюда https://arstarvoin1-design.github.io/atelier-shop/, когда выложим сайт)
-SITE_URL = ""
+SITE_URL = "https://arstarvoin1-design.github.io/atelier-shop/"
 
 # Канал бренда для проверки подписки за промокод (например "@atelier_brand" или оставь "")
 CHANNEL_USERNAME = ""
