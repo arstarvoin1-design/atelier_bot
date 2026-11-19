@@ -1,0 +1,1264 @@
+import asyncio
+import hashlib
+import hmac
+import html
+import json
+import os
+import random
+import sqlite3
+import time
+import urllib.parse
+from contextlib import asynccontextmanager
+from typing import Optional
+
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import (
+    FSInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    MenuButtonWebApp,
+    ReplyKeyboardMarkup,
+    WebAppInfo,
+)
+from fastapi import FastAPI, File, Header, HTTPException, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+
+# ================= НАСТРОЙКИ МАГАЗИНА =================
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = 5100544808
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "atelier2026")
+SITE_URL = os.getenv("SITE_URL", "")
+
+SHOP_NAME = "ATELIER"
+PROMO_CODE = "ATELIER10"
+CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME", "")
+
+CONTACT_PHONE = "+79917994883"
+PAYMENT_URL = "https://t.tb.ru/c2c-qr-choose-bank?requisiteNumber=+79050090209&bankCode=100000000004"
+QR_IMAGE_PATH = "qr.jpg"
+
+DATA_DIR = os.getenv("DATA_DIR", ".")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH = os.path.join(DATA_DIR, "atelier.db")
+UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+PAYMENT_TEXT = (
+    "💳 <b>Оплата через СБП (без комиссии):</b>\n\n"
+    "• <b>Банк:</b> Т-Банк / Сбербанк\n"
+    "• <b>Телефон (нажмите, чтобы скопировать):</b>\n"
+    "<code>+79050090209</code>\n"
+    "• <b>Получатель:</b> Арсен Е.\n\n"
+    "📲 <i>Нажмите кнопку «Перейти к оплате (СБП)» ниже, отсканируйте QR-код или переведите по номеру телефона. После перевода отправьте скриншот чека в этот чат!</i>"
+)
+
+DELIVERY_TEXT = (
+    "🚚 <b>Условия доставки и возврата:</b>\n\n"
+    "• <b>СДЭК</b> (до пункта выдачи или курьером): 2–5 рабочих дней, от 350 ₽.\n"
+    "• <b>Почта России</b>: 4–8 рабочих дней, от 300 ₽.\n"
+    "• <b>Бесплатная доставка</b> при заказе от 5 000 ₽.\n\n"
+    "🔄 <b>Возврат и обмен:</b> возможен в течение 14 дней при сохранении товарного вида и бирок."
+)
+
+CONTACTS_TEXT = (
+    "📞 <b>Контакт для связи и предложений:</b>\n\n"
+    f"• <b>Телефон / WhatsApp / Telegram:</b> <code>{CONTACT_PHONE}</code>\n"
+    "• По вопросам сотрудничества, опта и индивидуальных предложений звоните или пишите менеджеру прямо в этом чате!"
+)
+# ======================================================
+
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+media_groups_buffer: dict[str, dict] = {}
+
+
+# ================= БАЗА ДАННЫХ SQLITE =================
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS admins (
+        tg_id INTEGER PRIMARY KEY,
+        name TEXT,
+        added_at REAL
+    )
+    """)
+    cur.execute("INSERT OR IGNORE INTO admins (tg_id, name, added_at) VALUES (?, ?, ?)", (ADMIN_ID, "Владелец", time.time()))
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        tg_id INTEGER PRIMARY KEY,
+        username TEXT,
+        full_name TEXT,
+        photo_url TEXT,
+        created_at REAL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS groups (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        slug TEXT UNIQUE,
+        title TEXT,
+        cover TEXT,
+        description TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS products (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_slug TEXT,
+        name TEXT,
+        price INTEGER,
+        fabric TEXT,
+        description TEXT,
+        photos_json TEXT,
+        stock_json TEXT,
+        size_chart_json TEXT,
+        created_at REAL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS orders (
+        order_id TEXT PRIMARY KEY,
+        user_tg_id INTEGER,
+        customer_name TEXT,
+        address TEXT,
+        items_json TEXT,
+        delivery_cost INTEGER,
+        total_amount INTEGER,
+        status TEXT,
+        is_archived INTEGER DEFAULT 0,
+        created_at REAL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_tg_id INTEGER,
+        client_name TEXT,
+        sender_role TEXT,
+        source TEXT,
+        text TEXT,
+        created_at REAL
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS reviews (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        product_id INTEGER,
+        user_tg_id INTEGER,
+        user_name TEXT,
+        rating INTEGER,
+        text TEXT,
+        photo_url TEXT,
+        created_at REAL,
+        UNIQUE(product_id, user_tg_id)
+    )
+    """)
+
+    cur.execute("SELECT COUNT(*) as cnt FROM groups")
+    if cur.fetchone()["cnt"] == 0:
+        default_groups = [
+            ("hoodie", "Худи", "https://images.unsplash.com/photo-1556821840-3a63f95609a7?auto=format&fit=crop&w=800&q=80", "Плотный футер 460 г/м² и свободный оверсайз-крой"),
+            ("tee", "Футболки", "https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&w=800&q=80", "Тяжёлый хлопок 260–280 г/м², держащий форму"),
+            ("sweatshirt", "Свитшоты", "https://images.unsplash.com/photo-1614975059251-992f11792b9f?auto=format&fit=crop&w=800&q=80", "Минималистичная база на каждый день"),
+        ]
+        cur.executemany("INSERT INTO groups (slug, title, cover, description) VALUES (?, ?, ?, ?)", default_groups)
+
+    cur.execute("SELECT COUNT(*) as cnt FROM products")
+    if cur.fetchone()["cnt"] == 0:
+        sample_chart = [
+            {"size": "S", "chest": "54", "shoulders": "50", "length": "68"},
+            {"size": "M", "chest": "57", "shoulders": "52", "length": "71"},
+            {"size": "L", "chest": "60", "shoulders": "54", "length": "74"},
+            {"size": "XL", "chest": "63", "shoulders": "56", "length": "76"},
+        ]
+        sample_products = [
+            (
+                "hoodie",
+                "Худи ATELIER Heavyweight Black",
+                5900,
+                "Футер 460 г/м²",
+                "100% хлопок диагональ, двойной объёмный капюшон и спущенное плечо.",
+                json.dumps(["https://images.unsplash.com/photo-1556821840-3a63f95609a7?auto=format&fit=crop&w=800&q=80"]),
+                json.dumps({"S": 4, "M": 7, "L": 5, "XL": 2}),
+                json.dumps(sample_chart),
+                time.time(),
+            ),
+            (
+                "tee",
+                "Футболка ATELIER Boxy Fit White",
+                2900,
+                "Хлопок 260 г/м²",
+                "Плотный джерси, не просвечивает, воротник-резинка держит форму после стирок.",
+                json.dumps(["https://images.unsplash.com/photo-1521572163474-6864f9cf17ab?auto=format&fit=crop&w=800&q=80"]),
+                json.dumps({"S": 6, "M": 10, "L": 8, "XL": 3}),
+                json.dumps(sample_chart),
+                time.time(),
+            ),
+            (
+                "sweatshirt",
+                "Свитшот ATELIER Graphite",
+                4800,
+                "Футер 420 г/м²",
+                "Свободный крой, мягкий браш внутри, минималистичная вышивка в тон.",
+                json.dumps(["https://images.unsplash.com/photo-1614975059251-992f11792b9f?auto=format&fit=crop&w=800&q=80"]),
+                json.dumps({"S": 0, "M": 5, "L": 4, "XL": 2}),
+                json.dumps(sample_chart),
+                time.time(),
+            ),
+        ]
+        cur.executemany(
+            """INSERT INTO products (group_slug, name, price, fabric, description, photos_json, stock_json, size_chart_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            sample_products,
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def get_admin_ids() -> list[int]:
+    conn = get_db()
+    rows = conn.execute("SELECT tg_id FROM admins").fetchall()
+    conn.close()
+    return [r["tg_id"] for r in rows]
+
+
+def is_admin_tg(tg_id: int) -> bool:
+    return tg_id in get_admin_ids()
+
+
+def upsert_user(tg_id: int, username: str = "", full_name: str = "", photo_url: str = ""):
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO users (tg_id, username, full_name, photo_url, created_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(tg_id) DO UPDATE SET
+             username=COALESCE(NULLIF(excluded.username, ''), users.username),
+             full_name=COALESCE(NULLIF(excluded.full_name, ''), users.full_name),
+             photo_url=COALESCE(NULLIF(excluded.photo_url, ''), users.photo_url)""",
+        (tg_id, username, full_name, photo_url, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def serialize_product(row: sqlite3.Row, conn: sqlite3.Connection) -> dict:
+    pid = row["id"]
+    rev_stat = conn.execute(
+        "SELECT AVG(rating) as avg_r, COUNT(*) as cnt FROM reviews WHERE product_id = ?", (pid,)
+    ).fetchone()
+    avg_rating = round(float(rev_stat["avg_r"]), 1) if rev_stat and rev_stat["avg_r"] is not None else 0.0
+    review_count = int(rev_stat["cnt"]) if rev_stat else 0
+
+    return {
+        "id": pid,
+        "group_slug": row["group_slug"] or "other",
+        "name": row["name"],
+        "price": row["price"],
+        "fabric": row["fabric"] or "",
+        "description": row["description"] or "",
+        "photos": json.loads(row["photos_json"] or "[]"),
+        "stock": json.loads(row["stock_json"] or "{}"),
+        "size_chart": json.loads(row["size_chart_json"] or "[]"),
+        "rating_avg": avg_rating,
+        "review_count": review_count,
+    }
+
+
+def format_price(num: int) -> str:
+    return f"{int(num):,}".replace(",", " ") + " ₽"
+
+
+def verify_telegram_webapp_init_data(init_data: str) -> Optional[dict]:
+    if not init_data or not BOT_TOKEN:
+        return None
+    try:
+        parsed = dict(urllib.parse.parse_qsl(init_data, strict_parsing=True))
+        received_hash = parsed.pop("hash", "")
+        data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(parsed.items()))
+        secret_key = hmac.new(b"WebAppData", BOT_TOKEN.encode("utf-8"), hashlib.sha256).digest()
+        calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+        if hmac.compare_digest(calculated_hash, received_hash):
+            return json.loads(parsed.get("user", "{}"))
+    except Exception:
+        return None
+    return None
+
+
+def verify_telegram_login_widget(data: dict) -> bool:
+    if not BOT_TOKEN or "hash" not in data:
+        return False
+    check_data = {k: str(v) for k, v in data.items() if k != "hash" and v is not None and v != ""}
+    received_hash = str(data["hash"])
+    data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(check_data.items()))
+    secret_key = hashlib.sha256(BOT_TOKEN.encode("utf-8")).digest()
+    calculated_hash = hmac.new(secret_key, data_check_string.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(calculated_hash, received_hash)
+
+
+# ================= FASTAPI (ЕДИНЫЙ API ДЛЯ САЙТА И ПРИЛОЖЕНИЙ) =================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    init_db()
+    if SITE_URL.startswith("https://"):
+        try:
+            await bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="🛍 Магазин", web_app=WebAppInfo(url=SITE_URL))
+            )
+        except Exception as e:
+            print("Menu button warning:", e)
+    polling_task = asyncio.create_task(dp.start_polling(bot, handle_signals=False))
+    print("🚀 Сервер ATELIER API + Telegram Bot запущены!")
+    yield
+    polling_task.cancel()
+    await bot.session.close()
+
+
+app = FastAPI(title="ATELIER Store API", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
+
+def check_admin_header(x_admin_token: Optional[str]):
+    if not x_admin_token or x_admin_token.strip() != ADMIN_SECRET:
+        raise HTTPException(status_code=401, detail="Неверный код администратора")
+
+
+@app.get("/")
+async def serve_index():
+    if os.path.exists("index.html"):
+        return FileResponse("index.html")
+    return JSONResponse({"status": "ATELIER API running", "version": "1.1"})
+
+
+@app.get("/api/bootstrap")
+async def api_bootstrap():
+    conn = get_db()
+    groups = [dict(r) for r in conn.execute("SELECT * FROM groups ORDER BY id ASC").fetchall()]
+    prod_rows = conn.execute("SELECT * FROM products ORDER BY id DESC").fetchall()
+    products = [serialize_product(r, conn) for r in prod_rows]
+    conn.close()
+
+    bot_username = ""
+    try:
+        me = await bot.get_me()
+        bot_username = me.username or ""
+    except Exception:
+        bot_username = "Ateliershopbot"
+
+    return {
+        "version": "1.1",
+        "shop_name": SHOP_NAME,
+        "bot_username": bot_username,
+        "contact_phone": CONTACT_PHONE,
+        "promo_code": PROMO_CODE,
+        "groups": groups,
+        "products": products,
+    }
+
+
+@app.post("/api/admin/verify")
+async def api_admin_verify(request: Request):
+    body = await request.json()
+    token = (body.get("token") or "").strip()
+    if token == ADMIN_SECRET:
+        return {"ok": True}
+    raise HTTPException(status_code=401, detail="Неверный пароль администратора")
+
+
+@app.post("/api/auth/telegram")
+async def api_auth_telegram(request: Request):
+    body = await request.json()
+    init_data = body.get("initData")
+    widget_data = body.get("widgetData")
+    tg_user = None
+
+    if init_data:
+        tg_user = verify_telegram_webapp_init_data(init_data)
+    elif widget_data and verify_telegram_login_widget(widget_data):
+        tg_user = widget_data
+
+    if not tg_user or not tg_user.get("id"):
+        raise HTTPException(status_code=401, detail="Не удалось подтвердить аккаунт Telegram")
+
+    tg_id = int(tg_user["id"])
+    full_name = f"{tg_user.get('first_name', '')} {tg_user.get('last_name', '')}".strip() or f"User {tg_id}"
+    username = tg_user.get("username", "")
+    photo_url = tg_user.get("photo_url", "")
+    upsert_user(tg_id, username, full_name, photo_url)
+
+    return {
+        "ok": True,
+        "user": {
+            "tg_id": tg_id,
+            "full_name": full_name,
+            "username": username,
+            "photo_url": photo_url,
+            "is_admin": is_admin_tg(tg_id),
+        },
+    }
+
+
+@app.post("/api/upload")
+async def api_upload_files(files: list[UploadFile] = File(...)):
+    urls = []
+    for idx, f in enumerate(files):
+        ext = os.path.splitext(f.filename or "img.jpg")[1] or ".jpg"
+        fname = f"{int(time.time() * 1000)}_{idx}{ext}"
+        fpath = os.path.join(UPLOAD_DIR, fname)
+        content = await f.read()
+        with open(fpath, "wb") as out:
+            out.write(content)
+        urls.append(f"/uploads/{fname}")
+    return {"urls": urls}
+
+
+@app.post("/api/groups")
+async def api_create_group(request: Request, x_admin_token: Optional[str] = Header(None)):
+    check_admin_header(x_admin_token)
+    body = await request.json()
+    title = (body.get("title") or "").strip()
+    slug = (body.get("slug") or "").strip().lower() or f"grp_{int(time.time())}"
+    cover = (body.get("cover") or "").strip()
+    description = (body.get("description") or "").strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Укажите название группы")
+
+    conn = get_db()
+    conn.execute(
+        "INSERT OR REPLACE INTO groups (slug, title, cover, description) VALUES (?, ?, ?, ?)",
+        (slug, title, cover, description),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/products")
+async def api_create_product(request: Request, x_admin_token: Optional[str] = Header(None)):
+    check_admin_header(x_admin_token)
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    price = int(body.get("price") or 0)
+    if not name or price <= 0:
+        raise HTTPException(status_code=400, detail="Укажите название и цену")
+
+    group_slug = (body.get("group_slug") or "other").strip()
+    fabric = (body.get("fabric") or "100% хлопок").strip()
+    description = (body.get("description") or "").strip()
+    photos = body.get("photos") or []
+    stock = body.get("stock") or {"S": 5, "M": 5, "L": 5, "XL": 5}
+    size_chart = body.get("size_chart") or []
+
+    conn = get_db()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO products (group_slug, name, price, fabric, description, photos_json, stock_json, size_chart_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            group_slug,
+            name,
+            price,
+            fabric,
+            description,
+            json.dumps(photos, ensure_ascii=False),
+            json.dumps(stock, ensure_ascii=False),
+            json.dumps(size_chart, ensure_ascii=False),
+            time.time(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.delete("/api/products/{product_id}")
+async def api_delete_product(product_id: int, x_admin_token: Optional[str] = Header(None)):
+    check_admin_header(x_admin_token)
+    conn = get_db()
+    conn.execute("DELETE FROM products WHERE id = ?", (product_id,))
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.post("/api/orders")
+async def api_create_order(request: Request):
+    body = await request.json()
+    user_tg_id = int(body.get("user_tg_id") or 0)
+    customer_name = (body.get("customer_name") or "").strip()
+    address = (body.get("address") or "").strip()
+    items = body.get("items") or []
+    delivery_cost = int(body.get("delivery_cost") or 0)
+    total_amount = int(body.get("total_amount") or 0)
+
+    if not customer_name or not address or not items:
+        raise HTTPException(status_code=400, detail="Заполните данные заказа")
+
+    order_id = str(random.randint(1000, 9999))
+    conn = get_db()
+
+    for it in items:
+        pid = int(it.get("product_id") or 0)
+        sz = str(it.get("size") or "")
+        qty = int(it.get("qty") or 1)
+        prow = conn.execute("SELECT stock_json FROM products WHERE id = ?", (pid,)).fetchone()
+        if prow:
+            st = json.loads(prow["stock_json"] or "{}")
+            if sz in st:
+                st[sz] = max(0, int(st[sz]) - qty)
+                conn.execute("UPDATE products SET stock_json = ? WHERE id = ?", (json.dumps(st), pid))
+
+    conn.execute(
+        """INSERT INTO orders (order_id, user_tg_id, customer_name, address, items_json, delivery_cost, total_amount, status, is_archived, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
+        (
+            order_id,
+            user_tg_id,
+            customer_name,
+            address,
+            json.dumps(items, ensure_ascii=False),
+            delivery_cost,
+            total_amount,
+            "Ожидает оплаты",
+            time.time(),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+    lines = "\n".join(
+        f"• {html.escape(i['name'])} ({html.escape(i['size'])}) × {i['qty']} = {format_price(i['price'] * i['qty'])}"
+        for i in items
+    )
+    admin_msg = (
+        f"🛍 <b>НОВЫЙ ЗАКАЗ С САЙТА #{order_id}</b>\n\n"
+        f"{lines}\n\n"
+        f"🚚 Доставка: <b>{format_price(delivery_cost) if delivery_cost else 'Бесплатно'}</b>\n"
+        f"💰 Итого: <b>{format_price(total_amount)}</b>\n"
+        f"👤 Получатель: {html.escape(customer_name)}\n"
+        f"📍 Адрес: {html.escape(address)}\n"
+        f"ID клиента: <code>{user_tg_id}</code>"
+    )
+    for adm in get_admin_ids():
+        try:
+            await bot.send_message(adm, admin_msg, parse_mode="HTML", reply_markup=get_order_admin_keyboard(order_id))
+        except Exception:
+            pass
+
+    if user_tg_id:
+        try:
+            await send_sbp_payment(user_tg_id, f"✅ <b>Ваш заказ #{order_id} с сайта ATELIER принят!</b>")
+        except Exception:
+            pass
+
+    return {"ok": True, "order_id": order_id}
+
+
+@app.get("/api/orders/{tg_id}")
+async def api_user_orders(tg_id: int):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM orders WHERE user_tg_id = ? ORDER BY created_at DESC", (tg_id,)
+    ).fetchall()
+    conn.close()
+
+    active, archive = [], []
+    for r in rows:
+        item = dict(r)
+        item["items"] = json.loads(item.pop("items_json") or "[]")
+        if item["is_archived"] or item["status"] in ("Доставлено", "Отменен"):
+            archive.append(item)
+        else:
+            active.append(item)
+    return {"active": active, "archive": archive}
+
+
+@app.post("/api/orders/{order_id}/confirm-delivery")
+async def api_confirm_delivery(order_id: str, request: Request):
+    body = await request.json()
+    tg_id = int(body.get("tg_id") or 0)
+    conn = get_db()
+    row = conn.execute("SELECT * FROM orders WHERE order_id = ?", (order_id,)).fetchone()
+    if not row or int(row["user_tg_id"]) != tg_id:
+        conn.close()
+        raise HTTPException(status_code=403, detail="Заказ не найден или нет доступа")
+
+    conn.execute(
+        "UPDATE orders SET status = 'Доставлено', is_archived = 1 WHERE order_id = ?", (order_id,)
+    )
+    conn.commit()
+    conn.close()
+
+    for adm in get_admin_ids():
+        try:
+            await bot.send_message(
+                adm,
+                f"📬 Клиент подтвердил получение по <b>Заказу #{html.escape(order_id)}</b>!\n"
+                f"Статус изменен на <b>«Доставлено»</b>, заказ перенесен в архив, клиенту открыта публикация отзывов.",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    return {"ok": True}
+
+
+def can_user_review_product(conn: sqlite3.Connection, tg_id: int, product_id: int) -> bool:
+    if not tg_id:
+        return False
+    rows = conn.execute(
+        "SELECT items_json FROM orders WHERE user_tg_id = ? AND status = 'Доставлено'", (tg_id,)
+    ).fetchall()
+    for r in rows:
+        items = json.loads(r["items_json"] or "[]")
+        if any(int(it.get("product_id") or 0) == product_id for it in items):
+            return True
+    return False
+
+
+@app.get("/api/products/{product_id}/reviews")
+async def api_get_reviews(product_id: int, tg_id: int = 0):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM reviews WHERE product_id = ? ORDER BY created_at DESC", (product_id,)
+    ).fetchall()
+    can_review = can_user_review_product(conn, tg_id, product_id)
+    already = False
+    if tg_id:
+        ex = conn.execute(
+            "SELECT id FROM reviews WHERE product_id = ? AND user_tg_id = ?", (product_id, tg_id)
+        ).fetchone()
+        already = bool(ex)
+    conn.close()
+
+    return {
+        "reviews": [dict(r) for r in rows],
+        "can_review": can_review and not already,
+        "already_reviewed": already,
+    }
+
+
+@app.post("/api/products/{product_id}/reviews")
+async def api_post_review(product_id: int, request: Request):
+    body = await request.json()
+    tg_id = int(body.get("tg_id") or 0)
+    rating = int(body.get("rating") or 5)
+    text = (body.get("text") or "").strip()
+    photo_url = (body.get("photo_url") or "").strip()
+
+    if rating < 1 or rating > 5:
+        raise HTTPException(status_code=400, detail="Оценка должна быть от 1 до 5")
+
+    conn = get_db()
+    if not can_user_review_product(conn, tg_id, product_id):
+        conn.close()
+        raise HTTPException(
+            status_code=403,
+            detail="Оставить отзыв можно только после выкупа товара и подтверждения статуса «Доставлено»",
+        )
+
+    urow = conn.execute("SELECT full_name FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
+    user_name = urow["full_name"] if urow else f"Покупатель #{tg_id}"
+
+    conn.execute(
+        """INSERT OR REPLACE INTO reviews (product_id, user_tg_id, user_name, rating, text, photo_url, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+        (product_id, tg_id, user_name, rating, text, photo_url, time.time()),
+    )
+    conn.commit()
+    conn.close()
+    return {"ok": True}
+
+
+@app.get("/api/chat/{client_tg_id}")
+async def api_get_client_chat(client_tg_id: int):
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM messages WHERE client_tg_id = ? ORDER BY id ASC", (client_tg_id,)
+    ).fetchall()
+    conn.close()
+    return {"messages": [dict(r) for r in rows]}
+
+
+@app.post("/api/chat/send")
+async def api_send_chat_message(request: Request):
+    body = await request.json()
+    client_tg_id = int(body.get("client_tg_id") or 0)
+    client_name = (body.get("client_name") or "").strip() or f"Гость #{client_tg_id}"
+    text = (body.get("text") or "").strip()
+    source = (body.get("source") or "web").strip()
+
+    if not client_tg_id or not text:
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
+
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO messages (client_tg_id, client_name, sender_role, source, text, created_at)
+           VALUES (?, ?, 'client', ?, ?, ?)""",
+        (client_tg_id, client_name, source, text, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+    for adm in get_admin_ids():
+        try:
+            await bot.send_message(
+                adm,
+                f"💬 <b>Сообщение из чата на сайте</b>\n"
+                f"Клиент: <b>{html.escape(client_name)}</b>\n"
+                f"ID клиента: <code>{client_tg_id}</code>\n\n"
+                f"{html.escape(text)}\n\n"
+                f"<i>(Ответь Reply на это сообщение или в админ-чате на сайте)</i>",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    return {"ok": True}
+
+
+@app.get("/api/admin/chats")
+async def api_admin_chats(x_admin_token: Optional[str] = Header(None)):
+    check_admin_header(x_admin_token)
+    conn = get_db()
+    threads = conn.execute("""
+        SELECT m.client_tg_id,
+               MAX(m.client_name) as client_name,
+               MAX(m.id) as last_id,
+               (SELECT text FROM messages m2 WHERE m2.client_tg_id = m.client_tg_id ORDER BY m2.id DESC LIMIT 1) as last_text,
+               (SELECT created_at FROM messages m2 WHERE m2.client_tg_id = m.client_tg_id ORDER BY m2.id DESC LIMIT 1) as last_time
+        FROM messages m
+        GROUP BY m.client_tg_id
+        ORDER BY last_id DESC
+    """).fetchall()
+    conn.close()
+    return {"threads": [dict(t) for t in threads]}
+
+
+@app.post("/api/admin/chat/reply")
+async def api_admin_chat_reply(request: Request, x_admin_token: Optional[str] = Header(None)):
+    check_admin_header(x_admin_token)
+    body = await request.json()
+    client_tg_id = int(body.get("client_tg_id") or 0)
+    text = (body.get("text") or "").strip()
+    if not client_tg_id or not text:
+        raise HTTPException(status_code=400, detail="Пустой ответ")
+
+    conn = get_db()
+    row = conn.execute(
+        "SELECT client_name FROM messages WHERE client_tg_id = ? ORDER BY id DESC LIMIT 1", (client_tg_id,)
+    ).fetchone()
+    client_name = row["client_name"] if row else f"Клиент #{client_tg_id}"
+    conn.execute(
+        """INSERT INTO messages (client_tg_id, client_name, sender_role, source, text, created_at)
+           VALUES (?, ?, 'admin', 'web', ?, ?)""",
+        (client_tg_id, client_name, text, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+    if client_tg_id > 0:
+        try:
+            await bot.send_message(
+                client_tg_id,
+                f"💬 <b>Ответ менеджера ATELIER:</b>\n\n{html.escape(text)}",
+                parse_mode="HTML",
+            )
+        except Exception:
+            pass
+
+    return {"ok": True}
+
+
+# ================= TELEGRAM-БОТ (AIOGRAM V3) =================
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    rows = []
+    if SITE_URL.startswith("https://"):
+        rows.append([KeyboardButton(text="🛍 Открыть магазин", web_app=WebAppInfo(url=SITE_URL))])
+    rows.extend([
+        [KeyboardButton(text="👕 Каталог"), KeyboardButton(text="📦 Мои заказы")],
+        [KeyboardButton(text="💳 Оплата СБП"), KeyboardButton(text="🚚 Доставка и возврат")],
+        [KeyboardButton(text="🎁 Промокод"), KeyboardButton(text="📞 Контакты и связь")],
+    ])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def get_payment_keyboard() -> InlineKeyboardMarkup:
+    buttons = []
+    if PAYMENT_URL:
+        buttons.append([InlineKeyboardButton(text="💸 Перейти к оплате (СБП)", url=PAYMENT_URL)])
+    buttons.append([InlineKeyboardButton(text="📎 Я оплатил (отправить чек)", callback_data="send_receipt")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_order_admin_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="💳 Реквизиты", callback_data=f"ord:pay:{order_id}"),
+            InlineKeyboardButton(text="✅ Оплачено", callback_data=f"ord:paid:{order_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="📦 Отправлено", callback_data=f"ord:ship:{order_id}"),
+            InlineKeyboardButton(text="❌ Отменить", callback_data=f"ord:canc:{order_id}"),
+        ],
+    ])
+
+
+async def send_sbp_payment(chat_id: int, prefix_text: str = ""):
+    full_text = f"{prefix_text}\n\n{PAYMENT_TEXT}".strip()
+    kb = get_payment_keyboard()
+    if QR_IMAGE_PATH and os.path.exists(QR_IMAGE_PATH):
+        try:
+            await bot.send_photo(chat_id=chat_id, photo=FSInputFile(QR_IMAGE_PATH), caption=full_text, parse_mode="HTML", reply_markup=kb)
+            return
+        except Exception:
+            pass
+    await bot.send_message(chat_id=chat_id, text=full_text, parse_mode="HTML", reply_markup=kb)
+
+
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message, command: CommandObject):
+    uid = message.from_user.id
+    upsert_user(uid, message.from_user.username or "", message.from_user.full_name)
+
+    if is_admin_tg(uid):
+        await message.answer(
+            f"👋 Привет, <b>{html.escape(message.from_user.first_name)}</b>! Панель управления <b>{SHOP_NAME} v1.1</b> активна.\n\n"
+            "<b>Команды администратора:</b>\n"
+            "• <code>/add группа | Название | Цена | S:5, M:5, L:5 | Описание</code> — добавить товар в группу\n"
+            "• <code>/addgroup slug | Название группы</code> — создать новую группу товаров\n"
+            "• <code>/admin_login пароль</code> — выдать права админа другому менеджеру\n"
+            "• <b>Reply</b> на любое сообщение/чат с сайта — мгновенный ответ клиенту.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    args = command.args or ""
+    if args.startswith("order_"):
+        order_num = html.escape(args.split("_")[1])
+        await message.answer(
+            f"👋 Добро пожаловать в <b>{SHOP_NAME}</b>!\nМы привязали ваш <b>Заказ #{order_num}</b>.",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+        await send_sbp_payment(uid)
+    else:
+        await message.answer(
+            f"👋 Добро пожаловать в официальный бот магазина <b>{SHOP_NAME}</b>!\n\n"
+            "Откройте витрину кнопкой <b>«🛍 Открыть магазин»</b> или выберите раздел меню ниже 👇",
+            parse_mode="HTML",
+            reply_markup=get_main_keyboard(),
+        )
+
+
+@dp.message(Command("admin_login"))
+async def cmd_admin_login(message: types.Message, command: CommandObject):
+    pwd = (command.args or "").strip()
+    if pwd != ADMIN_SECRET:
+        await message.answer("❌ Неверный пароль администратора.")
+        return
+
+    uid = message.from_user.id
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO admins (tg_id, name, added_at) VALUES (?, ?, ?)", (uid, message.from_user.full_name, time.time()))
+    conn.commit()
+    conn.close()
+    await message.answer(
+        "✅ <b>Права администратора выданы!</b>\nТеперь вам доступны добавление товаров, управление заказами и ответы клиентам.",
+        parse_mode="HTML",
+        reply_markup=get_main_keyboard(),
+    )
+
+
+@dp.message(Command("addgroup"))
+async def cmd_add_group(message: types.Message, command: CommandObject):
+    if not is_admin_tg(message.from_user.id):
+        return
+    raw = (command.args or "").strip()
+    parts = [p.strip() for p in raw.split("|")]
+    if len(parts) < 2:
+        await message.answer("Пример: <code>/addgroup pants | Штаны и карго</code>", parse_mode="HTML")
+        return
+    slug, title = parts[0].lower(), parts[1]
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO groups (slug, title, cover, description) VALUES (?, ?, '', '')", (slug, title))
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ Группа <b>«{html.escape(title)}»</b> (<code>{html.escape(slug)}</code>) создана!", parse_mode="HTML")
+
+
+async def save_tg_photo_locally(file_id: str, idx: int = 0) -> str:
+    tg_file = await bot.get_file(file_id)
+    buf = await bot.download_file(tg_file.file_path)
+    fname = f"tg_{int(time.time() * 1000)}_{idx}.jpg"
+    fpath = os.path.join(UPLOAD_DIR, fname)
+    with open(fpath, "wb") as f:
+        f.write(buf.read())
+    return f"/uploads/{fname}"
+
+
+async def create_product_from_tg(message: types.Message, raw_text: str, file_ids: list[str]):
+    payload = raw_text.partition(" ")[2].strip()
+    parts = [p.strip() for p in payload.split("|")]
+    if len(parts) < 3:
+        await message.answer(
+            "➕ Формат: <code>/add группа | Название | Цена | S:5, M:5, L:5 | Описание</code>\n"
+            "Например: <code>/add tee | Футболка ATELIER Oversize | 3200 | S:4, M:6, L:3 | Плотный хлопок</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    group_slug = parts[0].lower()
+    name = parts[1]
+    price = int("".join(c for c in parts[2] if c.isdigit()) or 0)
+    stock = {}
+    if len(parts) > 3 and parts[3]:
+        for entry in parts[3].split(","):
+            if ":" in entry:
+                sz, cnt = entry.split(":", 1)
+                stock[sz.strip()] = int("".join(c for c in cnt if c.isdigit()) or 0)
+            elif entry.strip():
+                stock[entry.strip()] = 5
+    if not stock:
+        stock = {"S": 5, "M": 5, "L": 5, "XL": 5}
+    desc = parts[4] if len(parts) > 4 else ""
+
+    photos = [await save_tg_photo_locally(fid, i) for i, fid in enumerate(file_ids)]
+    default_chart = [{"size": sz, "chest": "—", "shoulders": "—", "length": "—"} for sz in stock.keys()]
+
+    conn = get_db()
+    conn.execute(
+        """INSERT INTO products (group_slug, name, price, fabric, description, photos_json, stock_json, size_chart_json, created_at)
+           VALUES (?, ?, ?, '100% хлопок', ?, ?, ?, ?, ?)""",
+        (group_slug, name, price, desc, json.dumps(photos), json.dumps(stock), json.dumps(default_chart), time.time()),
+    )
+    conn.commit()
+    conn.close()
+    await message.answer(f"✅ Товар <b>«{html.escape(name)}»</b> добавлен в группу <code>{html.escape(group_slug)}</code>!", parse_mode="HTML")
+
+
+async def finalize_media_group(mg_id: str):
+    await asyncio.sleep(0.9)
+    data = media_groups_buffer.pop(mg_id, None)
+    if not data:
+        return
+    if data["caption"].startswith("/add"):
+        await create_product_from_tg(data["message"], data["caption"], data["photos"])
+
+
+@dp.message(F.media_group_id, F.photo)
+async def handle_tg_album(message: types.Message):
+    if not is_admin_tg(message.from_user.id):
+        await forward_client_message(message)
+        return
+    mg_id = message.media_group_id
+    if mg_id not in media_groups_buffer:
+        media_groups_buffer[mg_id] = {"photos": [], "caption": "", "message": message}
+        asyncio.create_task(finalize_media_group(mg_id))
+    media_groups_buffer[mg_id]["photos"].append(message.photo[-1].file_id)
+    if message.caption:
+        media_groups_buffer[mg_id]["caption"] = message.caption
+        media_groups_buffer[mg_id]["message"] = message
+
+
+@dp.message(Command("add"))
+async def cmd_add(message: types.Message):
+    if not is_admin_tg(message.from_user.id):
+        return
+    raw = (message.text or message.caption or "").strip()
+    fids = [message.photo[-1].file_id] if message.photo else []
+    await create_product_from_tg(message, raw, fids)
+
+
+@dp.message(F.text == "👕 Каталог")
+async def show_groups_menu(message: types.Message):
+    conn = get_db()
+    groups = conn.execute("SELECT * FROM groups ORDER BY id ASC").fetchall()
+    conn.close()
+
+    kb_rows = [[InlineKeyboardButton(text=f"📁 {g['title']}", callback_data=f"grp:{g['slug']}:0")] for g in groups]
+    kb_rows.append([InlineKeyboardButton(text="🛍 Все товары", callback_data="grp:all:0")])
+    await message.answer("Выберите группу товаров:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+
+
+@dp.callback_query(F.data.startswith("grp:"))
+async def cb_group_browse(callback: types.CallbackQuery):
+    _, slug, idx_str = callback.data.split(":")
+    idx = int(idx_str)
+    conn = get_db()
+    if slug == "all":
+        rows = conn.execute("SELECT * FROM products ORDER BY id DESC").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM products WHERE group_slug = ? ORDER BY id DESC", (slug,)).fetchall()
+    items = [serialize_product(r, conn) for r in rows]
+    conn.close()
+
+    if not items:
+        await callback.answer("В этой группе пока нет товаров", show_alert=True)
+        return
+
+    idx = idx % len(items)
+    item = items[idx]
+    stock_str = ", ".join(f"{sz} ({cnt} шт.)" for sz, cnt in item["stock"].items() if int(cnt) > 0) or "нет в наличии"
+    rating_line = f"⭐️ Оценка: <b>{item['rating_avg']} / 5</b> ({item['review_count']} отз.)\n" if item["review_count"] else ""
+    chart_lines = "\n".join(
+        f"• <b>{r['size']}</b>: грудь {r.get('chest','—')} / плечи {r.get('shoulders','—')} / длина {r.get('length','—')}"
+        for r in item["size_chart"]
+    )
+    chart_block = f"\n\n📏 <b>Сетка размеров (см):</b>\n{chart_lines}" if chart_lines else ""
+
+    text = (
+        f"👕 <b>{html.escape(item['name'])}</b>\n\n"
+        f"💰 Цена: <b>{format_price(item['price'])}</b>\n"
+        f"{rating_line}"
+        f"📐 В наличии: <b>{html.escape(stock_str)}</b>\n\n"
+        f"{html.escape(item['description'])}"
+        f"{chart_block}"
+    )
+
+    prev_i = (idx - 1) % len(items)
+    next_i = (idx + 1) % len(items)
+    kb_rows = [
+        [
+            InlineKeyboardButton(text="⬅️", callback_data=f"grp:{slug}:{prev_i}"),
+            InlineKeyboardButton(text=f"{idx + 1}/{len(items)}", callback_data="noop"),
+            InlineKeyboardButton(text="➡️", callback_data=f"grp:{slug}:{next_i}"),
+        ],
+        [InlineKeyboardButton(text="⬅️ К выбору групп", callback_data="back_groups")],
+    ]
+    if is_admin_tg(callback.from_user.id):
+        kb_rows.append([InlineKeyboardButton(text="🗑 Удалить товар", callback_data=f"delprod:{item['id']}")])
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "back_groups")
+async def cb_back_groups(callback: types.CallbackQuery):
+    conn = get_db()
+    groups = conn.execute("SELECT * FROM groups ORDER BY id ASC").fetchall()
+    conn.close()
+    kb_rows = [[InlineKeyboardButton(text=f"📁 {g['title']}", callback_data=f"grp:{g['slug']}:0")] for g in groups]
+    kb_rows.append([InlineKeyboardButton(text="🛍 Все товары", callback_data="grp:all:0")])
+    await callback.message.edit_text("Выберите группу товаров:", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb_rows))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("delprod:"))
+async def cb_delete_product(callback: types.CallbackQuery):
+    if not is_admin_tg(callback.from_user.id):
+        return
+    pid = int(callback.data.split(":")[1])
+    conn = get_db()
+    conn.execute("DELETE FROM products WHERE id = ?", (pid,))
+    conn.commit()
+    conn.close()
+    await callback.answer("🗑 Товар удален")
+    await cb_back_groups(callback)
+
+
+@dp.message(F.text == "📦 Мои заказы")
+async def show_my_orders(message: types.Message):
+    uid = message.from_user.id
+    conn = get_db()
+    rows = conn.execute("SELECT * FROM orders WHERE user_tg_id = ? ORDER BY created_at DESC", (uid,)).fetchall()
+    conn.close()
+
+    if not rows:
+        await message.answer("У вас пока нет оформленных заказов. Откройте магазин и выберите вещи!")
+        return
+
+    active_lines, archive_lines, confirm_btns = [], [], []
+    for r in rows:
+        items = json.loads(r["items_json"] or "[]")
+        names = ", ".join(f"{i['name']} ({i['size']})" for i in items)
+        line = f"• <b>Заказ #{r['order_id']}</b> — {format_price(r['total_amount'])}\n  <i>{html.escape(names)}</i>\n  Статус: <b>{html.escape(r['status'])}</b>"
+        if r["is_archived"] or r["status"] in ("Доставлено", "Отменен"):
+            archive_lines.append(line)
+        else:
+            active_lines.append(line)
+            confirm_btns.append([InlineKeyboardButton(text=f"✅ Подтвердить доставку #{r['order_id']}", callback_data=f"cl_deliv:{r['order_id']}")])
+
+    msg = "📦 <b>АКТИВНЫЕ ЗАКАЗЫ:</b>\n" + ("\n\n".join(active_lines) if active_lines else "<i>Нет активных заказов</i>")
+    msg += "\n\n🗂 <b>АРХИВ ЗАКАЗОВ:</b>\n" + ("\n\n".join(archive_lines) if archive_lines else "<i>Архив пуст</i>")
+
+    await message.answer(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=confirm_btns) if confirm_btns else None)
+
+
+@dp.callback_query(F.data.startswith("cl_deliv:"))
+async def cb_client_confirm_delivery(callback: types.CallbackQuery):
+    oid = callback.data.split(":")[1]
+    uid = callback.from_user.id
+    conn = get_db()
+    conn.execute("UPDATE orders SET status = 'Доставлено', is_archived = 1 WHERE order_id = ? AND user_tg_id = ?", (oid, uid))
+    conn.commit()
+    conn.close()
+    await callback.answer("Спасибо! Статус «Доставлено» установлен, заказ перенесен в архив.")
+    await show_my_orders(callback.message)
+
+
+@dp.message(F.text == "📞 Контакты и связь")
+async def show_contacts(message: types.Message):
+    await message.answer(CONTACTS_TEXT, parse_mode="HTML")
+
+
+@dp.message(F.text == "💳 Оплата СБП")
+async def show_payment(message: types.Message):
+    await send_sbp_payment(message.chat.id)
+
+
+@dp.message(F.text == "🚚 Доставка и возврат")
+async def show_delivery(message: types.Message):
+    await message.answer(DELIVERY_TEXT, parse_mode="HTML")
+
+
+@dp.message(F.text == "🎁 Промокод")
+async def show_promo(message: types.Message):
+    await message.answer(f"🎁 Ваш промокод на скидку 10%: <code>{PROMO_CODE}</code>", parse_mode="HTML")
+
+
+@dp.callback_query(F.data == "send_receipt")
+async def cb_send_receipt(callback: types.CallbackQuery):
+    await callback.message.answer("📸 Отправьте скриншот или PDF-чек прямо в этот чат!")
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "noop")
+async def cb_noop(callback: types.CallbackQuery):
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("ord:"))
+async def cb_admin_order_status(callback: types.CallbackQuery):
+    if not is_admin_tg(callback.from_user.id):
+        await callback.answer("Нет прав", show_alert=True)
+        return
+    _, action, oid = callback.data.split(":")
+    if action == "pay":
+        await callback.message.reply(f"📋 <b>Реквизиты по заказу #{oid}:</b>\n\n{PAYMENT_TEXT}", parse_mode="HTML", reply_markup=get_payment_keyboard())
+        await callback.answer()
+        return
+
+    status_map = {
+        "paid": ("Оплачено (в сборке)", False, f"🎉 Оплата по заказу <b>#{oid}</b> подтверждена!"),
+        "ship": ("Отправлено", False, f"📦 Ваш заказ <b>#{oid}</b> отправлен! После получения нажмите «Доставлено» в разделе «Мои заказы»."),
+        "canc": ("Отменен", True, f"❌ Ваш заказ <b>#{oid}</b> был отменен."),
+    }
+    st_label, archived, notice = status_map.get(action, ("Обновлен", False, ""))
+
+    conn = get_db()
+    row = conn.execute("SELECT user_tg_id FROM orders WHERE order_id = ?", (oid,)).fetchone()
+    conn.execute("UPDATE orders SET status = ?, is_archived = ? WHERE order_id = ?", (st_label, 1 if archived else 0, oid))
+    conn.commit()
+    conn.close()
+
+    base_text = "\n".join(l for l in (callback.message.text or "").split("\n") if not l.startswith("📌 СТАТУС:"))
+    await callback.message.edit_text(f"{base_text}\n\n📌 СТАТУС: {st_label}", reply_markup=callback.message.reply_markup)
+
+    if row and row["user_tg_id"] and notice:
+        try:
+            await bot.send_message(row["user_tg_id"], notice, parse_mode="HTML")
+        except Exception:
+            pass
+    await callback.answer(f"Статус: {st_label}")
+
+
+@dp.message(F.reply_to_message)
+async def handle_admin_reply(message: types.Message):
+    if not is_admin_tg(message.from_user.id):
+        await forward_client_message(message)
+        return
+
+    replied = message.reply_to_message
+    client_id = None
+    if replied.forward_from:
+        client_id = replied.forward_from.id
+    elif replied.text and "ID клиента:" in replied.text:
+        try:
+            client_id = int(replied.text.split("ID клиента:")[1].strip().split()[0])
+        except Exception:
+            pass
+
+    if not client_id:
+        await message.reply("⚠️ Сделай Reply на сообщение с <code>ID клиента</code>.", parse_mode="HTML")
+        return
+
+    reply_text = message.text or message.caption or "[Медиафайл]"
+    conn = get_db()
+    row = conn.execute("SELECT client_name FROM messages WHERE client_tg_id = ? ORDER BY id DESC LIMIT 1", (client_id,)).fetchone()
+    cname = row["client_name"] if row else f"Клиент #{client_id}"
+    conn.execute(
+        "INSERT INTO messages (client_tg_id, client_name, sender_role, source, text, created_at) VALUES (?, ?, 'admin', 'tg', ?, ?)",
+        (client_id, cname, reply_text, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+    if client_id > 0:
+        try:
+            await bot.copy_message(chat_id=client_id, from_chat_id=message.chat.id, message_id=message.message_id)
+        except Exception:
+            pass
+    await message.reply("✅ Ответ отправлен клиенту (отобразится и на сайте, и в боте).")
+
+
+@dp.message()
+async def forward_client_message(message: types.Message):
+    if is_admin_tg(message.from_user.id):
+        return
+    uid = message.from_user.id
+    cname = message.from_user.full_name
+    upsert_user(uid, message.from_user.username or "", cname)
+
+    text_val = message.text or message.caption or "[Вложение из Telegram]"
+    conn = get_db()
+    conn.execute(
+        "INSERT INTO messages (client_tg_id, client_name, sender_role, source, text, created_at) VALUES (?, ?, 'client', 'tg', ?, ?)",
+        (uid, cname, text_val, time.time()),
+    )
+    conn.commit()
+    conn.close()
+
+    for adm in get_admin_ids():
+        try:
+            await bot.send_message(
+                adm,
+                f"📩 <b>Сообщение из Telegram от {html.escape(cname)}</b>\nID клиента: <code>{uid}</code>",
+                parse_mode="HTML",
+            )
+            await message.forward(adm)
+        except Exception:
+            pass
+    await message.answer("✅ Сообщение передано менеджеру! Ответ появится здесь и в чате на сайте.")
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("server:app", host="0.0.0.0", port=port)

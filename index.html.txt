@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>ATELIER — Official Store</title>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    :root {
+      --bg: #0b0b0c;
+      --surface: #141416;
+      --surface-2: #1e1e22;
+      --border: #2a2a30;
+      --text: #f5f5f7;
+      --muted: #8e8e93;
+      --card-bg: #ffffff;
+      --card-text: #111113;
+      --card-muted: #5c5c63;
+      --accent: #ffffff;
+      --success: #30d158;
+      --danger: #ff453a;
+      --radius: 16px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      padding-bottom: 40px;
+    }
+
+    header {
+      position: sticky; top: 0; z-index: 40;
+      background: rgba(11, 11, 12, 0.9);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 16px;
+      display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+    }
+    .brand { font-size: 19px; font-weight: 800; letter-spacing: 0.22em; text-transform: uppercase; cursor: pointer; }
+    .header-actions { display: flex; gap: 7px; align-items: center; flex-wrap: wrap; }
+    .icon-btn {
+      background: var(--surface-2); border: 1px solid var(--border);
+      color: var(--text); padding: 7px 11px; border-radius: 999px;
+      font-size: 12px; font-weight: 600; cursor: pointer;
+      display: inline-flex; align-items: center; gap: 5px;
+    }
+    .icon-btn.admin-on { border-color: var(--success); color: var(--success); }
+    .icon-btn.tg-logged { border-color: #2aabee; color: #5ac8fa; }
+    .cart-badge {
+      background: var(--accent); color: #0b0b0c;
+      font-size: 11px; font-weight: 800; padding: 1px 6px; border-radius: 999px;
+    }
+
+    .admin-bar {
+      display: none; margin: 14px 16px 0; padding: 12px 16px;
+      background: rgba(48, 209, 88, 0.1); border: 1px solid rgba(48, 209, 88, 0.35);
+      border-radius: 14px; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+    }
+    .admin-bar.visible { display: flex; }
+    .admin-bar-title { font-size: 13px; font-weight: 700; color: var(--success); }
+    .admin-bar-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn-green {
+      background: var(--success); color: #0b0b0c; border: none;
+      padding: 8px 13px; border-radius: 10px; font-size: 12px; font-weight: 700; cursor: pointer;
+    }
+    .btn-outline {
+      background: var(--surface-2); color: var(--text); border: 1px solid var(--border);
+      padding: 8px 12px; border-radius: 10px; font-size: 12px; font-weight: 600; cursor: pointer;
+    }
+
+    .hero {
+      margin: 16px; padding: 22px 18px;
+      background: linear-gradient(135deg, #1b1b20 0%, #111114 100%);
+      border: 1px solid var(--border); border-radius: 18px;
+    }
+    .hero-tag { font-size: 11px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+    .hero h1 { font-size: 22px; font-weight: 800; margin-bottom: 8px; }
+    .hero p { font-size: 13px; color: var(--muted); max-width: 500px; }
+    .hero-actions { margin-top: 14px; display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .promo-pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--surface-2); border: 1px dashed var(--border);
+      padding: 7px 12px; border-radius: 10px; font-size: 12px;
+    }
+    .promo-pill code { color: var(--success); font-weight: 700; cursor: pointer; }
+
+    .toolbar {
+      padding: 4px 16px 14px; display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .tabs { display: flex; gap: 8px; overflow-x: auto; }
+    .tab-btn {
+      background: var(--surface); border: 1px solid var(--border); color: var(--muted);
+      padding: 8px 15px; border-radius: 999px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    }
+    .tab-btn.active { background: #fff; color: #0b0b0c; border-color: #fff; }
+
+    .grid {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(265px, 1fr));
+      gap: 16px; padding: 0 16px;
+    }
+    .card {
+      background: var(--card-bg); color: var(--card-text);
+      border-radius: var(--radius); overflow: hidden;
+      display: flex; flex-direction: column;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+    }
+    .card-img-wrap {
+      position: relative; width: 100%; aspect-ratio: 4 / 4.2;
+      background: #ececef; overflow: hidden; cursor: pointer;
+    }
+    .card-img-wrap img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .no-photo-box {
+      width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+      color: #888; font-size: 14px; letter-spacing: 0.18em; font-weight: 800;
+    }
+    .badge-fabric {
+      position: absolute; top: 10px; left: 10px;
+      background: rgba(17, 17, 19, 0.85); color: #fff;
+      padding: 4px 9px; border-radius: 8px; font-size: 11px; font-weight: 600;
+    }
+    .badge-rating {
+      position: absolute; top: 10px; right: 10px;
+      background: rgba(255, 255, 255, 0.94); color: #111113;
+      padding: 4px 9px; border-radius: 8px; font-size: 11px; font-weight: 800;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+    }
+    .card-body { padding: 14px; display: flex; flex-direction: column; flex: 1; }
+    .card-title { font-size: 16px; font-weight: 800; color: var(--card-text); margin-bottom: 4px; cursor: pointer; }
+    .card-desc { font-size: 13px; color: var(--card-muted); margin-bottom: 10px; flex: 1; }
+    .card-price { font-size: 18px; font-weight: 800; color: var(--card-text); margin-bottom: 10px; }
+
+    .sizes { display: flex; gap: 6px; margin-bottom: 10px; flex-wrap: wrap; }
+    .size-btn {
+      min-width: 44px; height: 34px; padding: 0 8px;
+      background: #f2f2f5; border: 1px solid #dcdce0; color: #111113;
+      border-radius: 8px; font-size: 12px; font-weight: 700; cursor: pointer;
+    }
+    .size-btn.selected { background: #111113; color: #ffffff; border-color: #111113; }
+    .size-btn.out { opacity: 0.38; text-decoration: line-through; }
+
+    .add-btn {
+      width: 100%; padding: 11px; border: none; border-radius: 10px;
+      background: #111113; color: #ffffff;
+      font-size: 14px; font-weight: 700; cursor: pointer;
+    }
+    .card-secondary-btns { display: flex; gap: 6px; margin-top: 7px; }
+    .card-sec-btn {
+      flex: 1; padding: 8px; border-radius: 8px; font-size: 12px; font-weight: 700;
+      background: #f2f2f5; border: 1px solid #e0e0e5; color: #111113; cursor: pointer;
+    }
+    .card-admin-actions { display: flex; gap: 6px; margin-top: 7px; }
+    .card-admin-actions button {
+      flex: 1; padding: 7px; border-radius: 8px; font-size: 11px; font-weight: 700;
+      background: #fff0f0; border: 1px solid #ffccc7; color: #cf1322; cursor: pointer;
+    }
+
+    .contact-card {
+      margin: 26px 16px 0; padding: 18px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: 16px;
+      display: flex; justify-content: space-between; align-items: center; gap: 14px; flex-wrap: wrap;
+    }
+    .contact-card h3 { font-size: 15px; font-weight: 800; margin-bottom: 4px; }
+    .contact-card p { font-size: 13px; color: var(--muted); }
+    .contact-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    footer {
+      margin-top: 28px; padding: 12px 16px; text-align: center;
+      font-size: 11px; color: rgba(255, 255, 255, 0.22); letter-spacing: 0.08em;
+    }
+
+    .overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.78); backdrop-filter: blur(4px); z-index: 60; display: none; }
+    .overlay.open { display: block; }
+    .modal {
+      position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      width: calc(100% - 26px); max-width: 480px; max-height: 88vh; overflow-y: auto;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 18px; padding: 20px; z-index: 80; display: none;
+    }
+    .modal.open { display: block; }
+    .modal-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+    .close-btn {
+      background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+      width: 32px; height: 32px; border-radius: 50%; font-size: 15px; cursor: pointer;
+    }
+
+    .form-group { margin-top: 12px; }
+    .form-group label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+    .input, select.input, textarea.input {
+      width: 100%; padding: 10px 12px; border-radius: 10px;
+      background: var(--surface-2); border: 1px solid var(--border);
+      color: var(--text); font-size: 14px; outline: none; font-family: inherit;
+    }
+    .primary-btn {
+      width: 100%; margin-top: 14px; padding: 13px; border-radius: 12px; border: none;
+      background: #2aabee; color: #fff; font-size: 14px; font-weight: 700; cursor: pointer;
+    }
+    .primary-btn.green { background: var(--success); color: #0b0b0c; }
+
+    .size-table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12px; }
+    .size-table th, .size-table td { padding: 8px 6px; border-bottom: 1px solid var(--border); text-align: center; }
+    .size-table th { color: var(--muted); }
+    .chart-row-edit { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr 1fr; gap: 5px; margin-bottom: 6px; }
+    .chart-row-edit input { padding: 7px; font-size: 12px; background: var(--surface-2); border: 1px solid var(--border); color: #fff; border-radius: 7px; width: 100%; }
+
+    .chat-box {
+      height: 310px; overflow-y: auto; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 12px; padding: 12px;
+      display: flex; flex-direction: column; gap: 8px;
+    }
+    .msg-bubble { max-width: 80%; padding: 9px 12px; border-radius: 12px; font-size: 13px; }
+    .msg-bubble.client { align-self: flex-end; background: #2aabee; color: #fff; }
+    .msg-bubble.admin { align-self: flex-start; background: var(--surface-2); color: var(--text); border: 1px solid var(--border); }
+    .msg-meta { font-size: 10px; opacity: 0.7; margin-top: 3px; }
+    .admin-chat-layout { display: grid; grid-template-columns: 135px 1fr; gap: 10px; }
+    .thread-list { border-right: 1px solid var(--border); padding-right: 8px; max-height: 360px; overflow-y: auto; }
+    .thread-item { padding: 8px; border-radius: 9px; cursor: pointer; font-size: 12px; margin-bottom: 5px; background: var(--surface-2); }
+    .thread-item.active { border: 1px solid var(--success); }
+
+    .review-card { background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+    .review-card img { max-width: 110px; border-radius: 8px; margin-top: 8px; display: block; }
+    .order-box { background: var(--surface-2); border: 1px solid var(--border); border-radius: 12px; padding: 12px; margin-bottom: 10px; font-size: 13px; }
+
+    .toast {
+      position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+      background: #fff; color: #0b0b0c; padding: 10px 18px; border-radius: 999px;
+      font-size: 13px; font-weight: 700; z-index: 120; opacity: 0; pointer-events: none; transition: opacity 0.2s;
+    }
+    .toast.show { opacity: 1; }
+    .toast.error { background: var(--danger); color: #fff; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand" onclick="resetToHome()">ATELIER</div>
+    <div class="header-actions">
+      <button class="icon-btn" onclick="openChatModal()">💬 Чат</button>
+      <button class="icon-btn" onclick="openOrdersModal()">📦 Заказы</button>
+      <button class="icon-btn" id="tgAuthBtn" onclick="openAuthModal()">👤 Войти TG</button>
+      <button class="icon-btn" id="adminHeaderBtn" onclick="handleAdminClick()">⚙️ Админ</button>
+      <button class="icon-btn" onclick="openCartModal()">🛍 <span class="cart-badge" id="cartCount">0</span></button>
+    </div>
+  </header>
+
+  <div class="admin-bar" id="adminBar">
+    <div class="admin-bar-title">🟢 Режим администратора подтвержден</div>
+    <div class="admin-bar-btns">
+      <button class="btn-green" onclick="openAddGroupModal()">📁 + Группа</button>
+      <button class="btn-green" onclick="openAddProductModal()">➕ + Товар</button>
+      <button class="btn-outline" onclick="openAdminChatsModal()">💬 Чаты клиентов</button>
+      <button class="btn-outline" onclick="logoutAdmin()">Выйти</button>
+    </div>
+  </div>
+
+  <section class="hero">
+    <div class="hero-tag">DROP 01 • LIMITED COLLECTION</div>
+    <h1>Базовый гардероб из плотного хлопка</h1>
+    <p>Выберите группу коллекций или откройте полный каталог. Скидка 10% на первый заказ и быстрая доставка по всей России.</p>
+    <div class="hero-actions">
+      <div class="promo-pill">Промокод: <code onclick="copyPromo()">ATELIER10</code></div>
+      <button class="icon-btn" onclick="openContactsModal()">📞 Контакт для связи и предложений</button>
+    </div>
+  </section>
+
+  <div class="toolbar">
+    <div class="tabs" id="viewTabs">
+      <button class="tab-btn active" id="tabGroups" onclick="switchCatalogMode('groups')">📁 Группы товаров</button>
+      <button class="tab-btn" id="tabAll" onclick="switchCatalogMode('all')">👕 Все вещи</button>
+    </div>
+  </div>
+
+  <main class="grid" id="mainGrid"></main>
+
+  <section class="contact-card">
+    <div>
+      <h3>📞 Контакт для связи и предложений</h3>
+      <p>Телефон / WhatsApp / Telegram: <b>+79917994883</b> — сотрудничество, опт и вопросы по заказам.</p>
+    </div>
+    <div class="contact-btns">
+      <button class="icon-btn" onclick="openContactsModal()">Открыть контакты</button>
+      <button class="icon-btn" onclick="openChatModal()">💬 Чат на сайте</button>
+    </div>
+  </section>
+
+  <footer id="patchVersionFooter">1.1</footer>
+
+  <div class="overlay" id="overlay" onclick="closeAllModals()"></div>
+
+  <div class="modal" id="contactsModal">
+    <div class="modal-head">
+      <h3>📞 Контакт для связи и предложений</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <p style="font-size:14px; color:var(--muted); margin-bottom:12px;">
+      По вопросам заказов, сотрудничества, рекламы и любых предложений свяжитесь с нами удобным способом:
+    </p>
+    <div class="order-box">
+      <div style="font-size:12px; color:var(--muted);">Номер телефона:</div>
+      <div style="font-size:18px; font-weight:800; margin:4px 0;">+79917994883</div>
+      <button class="btn-outline" style="margin-top:6px;" onclick="copyPhone()">Скопировать номер</button>
+    </div>
+    <button class="primary-btn" onclick="openBotManager()">📲 Связь с менеджером в боте</button>
+    <button class="primary-btn" style="background:var(--surface-2); border:1px solid var(--border);" onclick="openChatModal()">💬 Написать прямо здесь на сайте</button>
+  </div>
+
+  <div class="modal" id="authModal">
+    <div class="modal-head">
+      <h3>👤 Авторизация через Telegram</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <div id="authModalBody"></div>
+  </div>
+
+  <div class="modal" id="productDetailModal">
+    <div class="modal-head">
+      <h3 id="detailTitle">Товар</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <div id="detailBody"></div>
+  </div>
+
+  <div class="modal" id="ordersModal">
+    <div class="modal-head">
+      <h3>📦 Мои заказы</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <div style="display:flex; gap:8px; margin-bottom:12px;">
+      <button class="tab-btn active" id="ordTabActive" onclick="renderOrdersTab('active')">Активные</button>
+      <button class="tab-btn" id="ordTabArchive" onclick="renderOrdersTab('archive')">Архив</button>
+    </div>
+    <div id="ordersBody"></div>
+  </div>
+
+  <div class="modal" id="chatModal">
+    <div class="modal-head">
+      <h3>💬 Чат с менеджером ATELIER</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <div class="chat-box" id="clientChatBox"></div>
+    <div style="display:flex; gap:8px; margin-top:10px;">
+      <input class="input" id="clientChatInput" placeholder="Напишите ваш вопрос..." onkeydown="if(event.key==='Enter') sendClientChat()" />
+      <button class="btn-green" onclick="sendClientChat()">Отправить</button>
+    </div>
+  </div>
+
+  <div class="modal" id="adminChatsModal" style="max-width:600px;">
+    <div class="modal-head">
+      <h3>💬 Чаты с клиентами (Сайт + Бот)</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <div class="admin-chat-layout">
+      <div class="thread-list" id="adminThreadList"></div>
+      <div>
+        <div class="chat-box" id="adminChatMessages" style="height:280px;"></div>
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <input class="input" id="adminReplyInput" placeholder="Ответить клиенту..." onkeydown="if(event.key==='Enter') sendAdminReply()" />
+          <button class="btn-green" onclick="sendAdminReply()">→</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal" id="adminLoginModal">
+    <div class="modal-head">
+      <h3>🔐 Вход для администратора</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <p style="font-size:13px; color:var(--muted);">Введите секретный пароль администратора:</p>
+    <div class="form-group">
+      <input class="input" type="password" id="adminTokenInput" placeholder="Пароль администратора" />
+    </div>
+    <button class="primary-btn green" onclick="verifyAndLoginAdmin()">Войти</button>
+  </div>
+
+  <div class="modal" id="addGroupModal">
+    <div class="modal-head">
+      <h3>📁 Новая группа товаров</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <div class="form-group">
+      <label>Название группы (например: Футболки)</label>
+      <input class="input" id="grpTitleInput" placeholder="Футболки" />
+    </div>
+    <div class="form-group">
+      <label>Код группы латиницей (например: tee)</label>
+      <input class="input" id="grpSlugInput" placeholder="tee" />
+    </div>
+    <div class="form-group">
+      <label>Обложка группы (фото)</label>
+      <input class="input" type="file" id="grpCoverInput" accept="image/*" />
+    </div>
+    <div class="form-group">
+      <label>Краткое описание группы</label>
+      <input class="input" id="grpDescInput" placeholder="Плотный хлопок оверсайз-кроя" />
+    </div>
+    <button class="primary-btn green" onclick="submitNewGroup()">Создать группу</button>
+  </div>
+
+  <div class="modal" id="addProductModal" style="max-width:540px;">
+    <div class="modal-head">
+      <h3>➕ Добавить товар</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <div class="form-group">
+      <label>Группа товаров</label>
+      <select class="input" id="prodGroupSelect"></select>
+    </div>
+    <div class="form-group">
+      <label>Фотографии</label>
+      <input class="input" type="file" id="prodPhotosInput" accept="image/*" multiple />
+    </div>
+    <div class="form-group">
+      <label>Название товара *</label>
+      <input class="input" id="prodNameInput" placeholder="Футболка ATELIER Heavy" />
+    </div>
+    <div class="form-group">
+      <label>Цена (₽) *</label>
+      <input class="input" type="number" id="prodPriceInput" placeholder="3200" />
+    </div>
+    <div class="form-group">
+      <label>Ткань / Плотность</label>
+      <input class="input" id="prodFabricInput" value="Хлопок 260 г/м²" />
+    </div>
+    <div class="form-group">
+      <label>Описание</label>
+      <textarea class="input" id="prodDescInput" rows="2"></textarea>
+    </div>
+
+    <div class="form-group">
+      <label>Индивидуальная сетка размеров и наличие (Размер | Остаток шт. | Грудь | Плечи | Длина)</label>
+      <div id="sizeChartBuilder"></div>
+      <button type="button" class="btn-outline" style="margin-top:6px;" onclick="addSizeBuilderRow()">+ Добавить размер</button>
+    </div>
+
+    <button class="primary-btn green" onclick="submitNewProduct()">Опубликовать товар</button>
+  </div>
+
+  <div class="modal" id="cartModal">
+    <div class="modal-head">
+      <h3>🛍 Корзина</h3>
+      <button class="close-btn" onclick="closeAllModals()">✕</button>
+    </div>
+    <div id="cartBody"></div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const tgApp = window.Telegram && window.Telegram.WebApp ? window.Telegram.WebApp : null;
+    if (tgApp) {
+      tgApp.ready();
+      tgApp.expand();
+    }
+
+    let appState = {
+      version: "1.1",
+      bot_username: "Ateliershopbot",
+      contact_phone: "+79917994883",
+      groups: [],
+      products: [],
+    };
+
+    let catalogMode = "groups";
+    let activeGroupSlug = null;
+    let selectedSizes = {};
+    let cart = JSON.parse(localStorage.getItem("atelier_cart_v2") || "[]");
+    let adminToken = localStorage.getItem("atelier_admin_secret") || "";
+    let tgUser = JSON.parse(localStorage.getItem("atelier_tg_user") || "null");
+    let ordersCache = { active: [], archive: [] };
+    let activeAdminChatClientId = null;
+
+    function showToast(text, isError = false) {
+      const el = document.getElementById("toast");
+      el.textContent = text;
+      el.classList.toggle("error", isError);
+      el.classList.add("show");
+      setTimeout(() => el.classList.remove("show"), 2600);
+    }
+
+    function formatPrice(num) {
+      return Number(num || 0).toLocaleString("ru-RU") + " ₽";
+    }
+
+    function getClientChatId() {
+      if (tgUser && tgUser.tg_id) return Number(tgUser.tg_id);
+      let guestId = localStorage.getItem("atelier_guest_chat_id");
+      if (!guestId) {
+        guestId = String(-Math.floor(100000 + Math.random() * 899999));
+        localStorage.setItem("atelier_guest_chat_id", guestId);
+      }
+      return Number(guestId);
+    }
+
+    async function loadBootstrap() {
+      try {
+        const res = await fetch("/api/bootstrap");
+        const data = await res.json();
+        appState = data;
+        document.getElementById("patchVersionFooter").textContent = data.version || "1.1";
+        data.products.forEach(p => {
+          if (!selectedSizes[p.id]) {
+            const avail = Object.keys(p.stock || {}).find(sz => Number(p.stock[sz]) > 0);
+            selectedSizes[p.id] = avail || Object.keys(p.stock || {})[0] || "M";
+          }
+        });
+        renderMainGrid();
+      } catch (e) {
+        showToast("Ошибка связи с сервером", true);
+      }
+    }
+
+    async function initTelegramAuth() {
+      if (tgApp && tgApp.initData) {
+        try {
+          const res = await fetch("/api/auth/telegram", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ initData: tgApp.initData }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            tgUser = data.user;
+            localStorage.setItem("atelier_tg_user", JSON.stringify(tgUser));
+          }
+        } catch (e) {}
+      }
+      updateAuthButtonUI();
+    }
+
+    function updateAuthButtonUI() {
+      const btn = document.getElementById("tgAuthBtn");
+      if (tgUser && tgUser.tg_id) {
+        btn.classList.add("tg-logged");
+        btn.textContent = `👤 ${tgUser.full_name.split(" ")[0]}`;
+      } else {
+        btn.classList.remove("tg-logged");
+        btn.textContent = "👤 Войти TG";
+      }
+    }
+
+    function openAuthModal() {
+      const body = document.getElementById("authModalBody");
+      if (tgUser && tgUser.tg_id) {
+        body.innerHTML = `
+          <div class="order-box">
+            <b>Вы вошли через Telegram:</b><br/>
+            Имя: ${tgUser.full_name}<br/>
+            ID: <code>${tgUser.tg_id}</code>
+          </div>
+          <button class="primary-btn" style="background:var(--danger);" onclick="logoutTgUser()">Выйти из аккаунта</button>
+        `;
+      } else {
+        body.innerHTML = `
+          <p style="font-size:13px; color:var(--muted); margin-bottom:12px;">
+            При открытии магазина внутри Telegram вход выполняется автоматически. Для входа из обычного браузера нажмите кнопку Telegram ниже:
+          </p>
+          <div id="tgWidgetContainer" style="display:flex; justify-content:center; margin:14px 0;"></div>
+        `;
+        const script = document.createElement("script");
+        script.src = "https://telegram.org/js/telegram-widget.js?22";
+        script.setAttribute("data-telegram-login", appState.bot_username || "Ateliershopbot");
+        script.setAttribute("data-size", "large");
+        script.setAttribute("data-onauth", "onTelegramWidgetAuth(user)");
+        script.setAttribute("data-request-access", "write");
+        document.getElementById("tgWidgetContainer").appendChild(script);
+      }
+      openModal("authModal");
+    }
+
+    window.onTelegramWidgetAuth = async function(user) {
+      const res = await fetch("/api/auth/telegram", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ widgetData: user }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        tgUser = data.user;
+        localStorage.setItem("atelier_tg_user", JSON.stringify(tgUser));
+        updateAuthButtonUI();
+        closeAllModals();
+        showToast(`Добро пожаловать, ${tgUser.full_name}!`);
+      } else {
+        showToast("Ошибка авторизации Telegram", true);
+      }
+    };
+
+    function logoutTgUser() {
+      tgUser = null;
+      localStorage.removeItem("atelier_tg_user");
+      updateAuthButtonUI();
+      closeAllModals();
+    }
+
+    async function checkSavedAdminToken() {
+      if (!adminToken) return;
+      try {
+        const res = await fetch("/api/admin/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ token: adminToken }),
+        });
+        if (!res.ok) {
+          adminToken = "";
+          localStorage.removeItem("atelier_admin_secret");
+        }
+      } catch (e) {
+        adminToken = "";
+      }
+      updateAdminUI();
+    }
+
+    function updateAdminUI() {
+      const isAdm = Boolean(adminToken);
+      document.getElementById("adminBar").classList.toggle("visible", isAdm);
+      const btn = document.getElementById("adminHeaderBtn");
+      btn.classList.toggle("admin-on", isAdm);
+      btn.textContent = isAdm ? "🟢 Админ" : "⚙️ Админ";
+      renderMainGrid();
+    }
+
+    function handleAdminClick() {
+      if (adminToken) openAddProductModal();
+      else openModal("adminLoginModal");
+    }
+
+    async function verifyAndLoginAdmin() {
+      const val = (document.getElementById("adminTokenInput").value || "").trim();
+      if (!val) return showToast("Введите пароль", true);
+
+      const res = await fetch("/api/admin/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: val }),
+      });
+      if (!res.ok) {
+        showToast("❌ Неверный пароль администратора!", true);
+        return;
+      }
+      adminToken = val;
+      localStorage.setItem("atelier_admin_secret", val);
+      closeAllModals();
+      updateAdminUI();
+      showToast("✅ Вход выполнен!");
+    }
+
+    function logoutAdmin() {
+      adminToken = "";
+      localStorage.removeItem("atelier_admin_secret");
+      updateAdminUI();
+    }
+
+    function switchCatalogMode(mode) {
+      catalogMode = mode;
+      activeGroupSlug = null;
+      document.getElementById("tabGroups").classList.toggle("active", mode === "groups");
+      document.getElementById("tabAll").classList.toggle("active", mode === "all");
+      renderMainGrid();
+    }
+
+    function resetToHome() {
+      switchCatalogMode("groups");
+    }
+
+    function openGroupProducts(slug) {
+      activeGroupSlug = slug;
+      renderMainGrid();
+    }
+
+    function renderMainGrid() {
+      const grid = document.getElementById("mainGrid");
+
+      if (catalogMode === "groups" && !activeGroupSlug) {
+        grid.innerHTML = appState.groups.map(g => {
+          const count = appState.products.filter(p => p.group_slug === g.slug).length;
+          return `
+            <article class="card" onclick="openGroupProducts('${g.slug}')" style="cursor:pointer;">
+              <div class="card-img-wrap">
+                <span class="badge-fabric">Группа • ${count} шт.</span>
+                ${g.cover ? `<img src="${g.cover}" alt="${g.title}" />` : `<div class="no-photo-box">${g.title.toUpperCase()}</div>`}
+              </div>
+              <div class="card-body">
+                <h3 class="card-title">📁 ${g.title}</h3>
+                <p class="card-desc">${g.description || "Нажмите, чтобы посмотреть все вещи этой группы"}</p>
+                <button class="add-btn">Открыть подборку →</button>
+              </div>
+            </article>
+          `;
+        }).join("");
+        return;
+      }
+
+      const items = activeGroupSlug
+        ? appState.products.filter(p => p.group_slug === activeGroupSlug)
+        : appState.products;
+
+      const backHeader = activeGroupSlug
+        ? `<div style="grid-column: 1 / -1;"><button class="icon-btn" onclick="switchCatalogMode('groups')">← Назад ко всем группам</button></div>`
+        : "";
+
+      if (!items.length) {
+        grid.innerHTML = backHeader + `<p style="color:var(--muted); padding:20px;">В этой группе пока нет товаров.</p>`;
+        return;
+      }
+
+      grid.innerHTML = backHeader + items.map(p => {
+        const photo = (p.photos && p.photos[0]) || "";
+        const stockEntries = Object.entries(p.stock || {});
+        const ratingBadge = p.review_count > 0 ? `★ ${p.rating_avg} (${p.review_count})` : "★ Новый";
+
+        return `
+          <article class="card">
+            <div class="card-img-wrap" onclick="openProductDetail(${p.id})">
+              ${p.fabric ? `<span class="badge-fabric">${p.fabric}</span>` : ""}
+              <span class="badge-rating">${ratingBadge}</span>
+              ${photo ? `<img src="${photo}" alt="${p.name}" />` : `<div class="no-photo-box">ATELIER</div>`}
+            </div>
+            <div class="card-body">
+              <h3 class="card-title" onclick="openProductDetail(${p.id})">${p.name}</h3>
+              <p class="card-desc">${p.description || ""}</p>
+              <div class="card-price">${formatPrice(p.price)}</div>
+
+              <div class="sizes">
+                ${stockEntries.map(([sz, qty]) => {
+                  const isOut = Number(qty) <= 0;
+                  const isSel = selectedSizes[p.id] === sz;
+                  return `<button class="size-btn ${isSel ? "selected" : ""} ${isOut ? "out" : ""}"
+                    onclick="selectCardSize(${p.id}, '${sz}', ${qty})">${sz} <small>(${qty})</small></button>`;
+                }).join("")}
+              </div>
+
+              <button class="add-btn" onclick="addProductToCart(${p.id})">В корзину</button>
+
+              <div class="card-secondary-btns">
+                <button class="card-sec-btn" onclick="openProductDetail(${p.id}, 'sizes')">📏 Сетка и наличие</button>
+                <button class="card-sec-btn" onclick="openProductDetail(${p.id}, 'reviews')">⭐ Отзывы (${p.review_count})</button>
+              </div>
+
+              ${adminToken ? `
+                <div class="card-admin-actions">
+                  <button onclick="adminDeleteProduct(${p.id})">🗑 Удалить</button>
+                </div>
+              ` : ""}
+            </div>
+          </article>
+        `;
+      }).join("");
+    }
+
+    function selectCardSize(pid, sz, qty) {
+      if (Number(qty) <= 0) return showToast("Этого размера сейчас нет в наличии", true);
+      selectedSizes[pid] = sz;
+      renderMainGrid();
+    }
+
+    async function openProductDetail(pid, focusTab = "sizes") {
+      const p = appState.products.find(x => x.id === pid);
+      if (!p) return;
+
+      document.getElementById("detailTitle").textContent = p.name;
+      const body = document.getElementById("detailBody");
+
+      const stockRows = Object.entries(p.stock || {}).map(([sz, cnt]) =>
+        `<tr><td><b>${sz}</b></td><td>${Number(cnt) > 0 ? `${cnt} шт. в наличии` : "Нет в наличии"}</td></tr>`
+      ).join("");
+
+      const chartRows = (p.size_chart || []).map(r =>
+        `<tr><td><b>${r.size}</b></td><td>${r.chest || "—"}</td><td>${r.shoulders || "—"}</td><td>${r.length || "—"}</td></tr>`
+      ).join("");
+
+      body.innerHTML = `
+        <p style="font-size:13px; color:var(--muted); margin-bottom:10px;">${p.description || ""}</p>
+        <div style="font-size:18px; font-weight:800; margin-bottom:12px;">${formatPrice(p.price)}</div>
+
+        <h4 style="font-size:14px; margin-bottom:6px;">📦 Наличие по размерам:</h4>
+        <table class="size-table" style="margin-bottom:14px;">
+          <thead><tr><th>Размер</th><th>Остаток</th></tr></thead>
+          <tbody>${stockRows}</tbody>
+        </table>
+
+        ${chartRows ? `
+          <h4 style="font-size:14px; margin-bottom:6px;">📏 Индивидуальная сетка замеров (см):</h4>
+          <table class="size-table" style="margin-bottom:16px;">
+            <thead><tr><th>Размер</th><th>Грудь</th><th>Плечи</th><th>Длина</th></tr></thead>
+            <tbody>${chartRows}</tbody>
+          </table>
+        ` : ""}
+
+        <h4 style="font-size:14px; margin-bottom:8px;">⭐ Отзывы покупателей (Средняя: ${p.rating_avg || "нет оценок"}):</h4>
+        <div id="productReviewsList"><p style="font-size:12px; color:var(--muted);">Загрузка отзывов...</p></div>
+        <div id="productReviewFormArea"></div>
+      `;
+      openModal("productDetailModal");
+
+      const uid = tgUser ? tgUser.tg_id : 0;
+      const revRes = await fetch(`/api/products/${pid}/reviews?tg_id=${uid}`);
+      const revData = await revRes.json();
+
+      const listEl = document.getElementById("productReviewsList");
+      if (!revData.reviews.length) {
+        listEl.innerHTML = `<p style="font-size:12px; color:var(--muted); margin-bottom:10px;">Пока нет отзывов на этот товар.</p>`;
+      } else {
+        listEl.innerHTML = revData.reviews.map(r => `
+          <div class="review-card">
+            <div style="display:flex; justify-content:space-between; font-size:12px;">
+              <b>${r.user_name}</b>
+              <span style="color:#ffd60a;">${"★".repeat(r.rating)}${"☆".repeat(5 - r.rating)}</span>
+            </div>
+            <p style="font-size:13px; margin-top:4px;">${r.text || ""}</p>
+            ${r.photo_url ? `<img src="${r.photo_url}" alt="Фото отзыва" />` : ""}
+          </div>
+        `).join("");
+      }
+
+      const formArea = document.getElementById("productReviewFormArea");
+      if (revData.can_review) {
+        formArea.innerHTML = `
+          <div class="order-box" style="margin-top:12px;">
+            <b>Оставить отзыв (вы подтвердили получение этого товара):</b>
+            <div class="form-group">
+              <label>Оценка (1–5 звёзд)</label>
+              <select class="input" id="revRatingSelect">
+                <option value="5">★★★★★ (5)</option>
+                <option value="4">★★★★☆ (4)</option>
+                <option value="3">★★★☆☆ (3)</option>
+                <option value="2">★★☆☆☆ (2)</option>
+                <option value="1">★☆☆☆☆ (1)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Комментарий</label>
+              <textarea class="input" id="revTextInput" rows="2" placeholder="Как сел размер и качество ткани?"></textarea>
+            </div>
+            <div class="form-group">
+              <label>Прикрепить фото (необязательно)</label>
+              <input class="input" type="file" id="revPhotoInput" accept="image/*" />
+            </div>
+            <button class="primary-btn green" onclick="submitProductReview(${pid})">Опубликовать отзыв</button>
+          </div>
+        `;
+      } else if (revData.already_reviewed) {
+        formArea.innerHTML = `<p style="font-size:12px; color:var(--success); margin-top:8px;">✅ Вы уже оставили отзыв на этот товар.</p>`;
+      } else {
+        formArea.innerHTML = `<p style="font-size:11px; color:var(--muted); margin-top:8px;">🔒 Оставить отзыв могут только авторизованные покупатели после выкупа товара и подтверждения статуса «Доставлено».</p>`;
+      }
+    }
+
+    async function submitProductReview(pid) {
+      if (!tgUser) return;
+      const rating = Number(document.getElementById("revRatingSelect").value);
+      const text = document.getElementById("revTextInput").value.trim();
+      const fileInput = document.getElementById("revPhotoInput");
+      let photoUrl = "";
+
+      if (fileInput.files && fileInput.files[0]) {
+        const fd = new FormData();
+        fd.append("files", fileInput.files[0]);
+        const upRes = await fetch("/api/upload", { method: "POST", body: fd });
+        const upData = await upRes.json();
+        photoUrl = (upData.urls && upData.urls[0]) || "";
+      }
+
+      const res = await fetch(`/api/products/${pid}/reviews`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tg_id: tgUser.tg_id, rating, text, photo_url: photoUrl }),
+      });
+
+      if (res.ok) {
+        showToast("✅ Отзыв опубликован!");
+        await loadBootstrap();
+        openProductDetail(pid);
+      } else {
+        const err = await res.json();
+        showToast(err.detail || "Ошибка публикации", true);
+      }
+    }
+
+    async function openOrdersModal() {
+      openModal("ordersModal");
+      if (!tgUser || !tgUser.tg_id) {
+        document.getElementById("ordersBody").innerHTML = `
+          <p style="font-size:13px; color:var(--muted); margin-bottom:12px;">
+            Войдите через Telegram, чтобы видеть свои активные заказы, архив и подтверждать доставку.
+          </p>
+          <button class="primary-btn" onclick="openAuthModal()">👤 Войти через Telegram</button>
+        `;
+        return;
+      }
+      const res = await fetch(`/api/orders/${tgUser.tg_id}`);
+      ordersCache = await res.json();
+      renderOrdersTab("active");
+    }
+
+    function renderOrdersTab(tab) {
+      document.getElementById("ordTabActive").classList.toggle("active", tab === "active");
+      document.getElementById("ordTabArchive").classList.toggle("active", tab === "archive");
+      const list = ordersCache[tab] || [];
+      const body = document.getElementById("ordersBody");
+
+      if (!list.length) {
+        body.innerHTML = `<p style="font-size:13px; color:var(--muted); text-align:center; padding:20px;">Список пуст</p>`;
+        return;
+      }
+
+      body.innerHTML = list.map(o => `
+        <div class="order-box">
+          <div style="display:flex; justify-content:space-between; margin-bottom:6px;">
+            <b>Заказ #${o.order_id}</b>
+            <span style="color:var(--success); font-weight:700;">${o.status}</span>
+          </div>
+          <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">
+            ${o.items.map(i => `${i.name} (${i.size}) × ${i.qty}`).join("<br/>")}
+          </div>
+          <div>Итого: <b>${formatPrice(o.total_amount)}</b> • Адрес: ${o.address}</div>
+          ${tab === "active" ? `
+            <button class="primary-btn green" style="margin-top:10px; padding:9px;" onclick="confirmOrderDelivered('${o.order_id}')">
+              ✅ Подтвердить получение (Доставлено)
+            </button>
+          ` : ""}
+        </div>
+      `).join("");
+    }
+
+    async function confirmOrderDelivered(orderId) {
+      const res = await fetch(`/api/orders/${orderId}/confirm-delivery`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tg_id: tgUser.tg_id }),
+      });
+      if (res.ok) {
+        showToast("📬 Статус «Доставлено» установлен! Теперь вы можете оставить отзыв.");
+        openOrdersModal();
+      }
+    }
+
+    async function openChatModal() {
+      openModal("chatModal");
+      await refreshClientChat();
+    }
+
+    async function refreshClientChat() {
+      const cid = getClientChatId();
+      const res = await fetch(`/api/chat/${cid}`);
+      const data = await res.json();
+      const box = document.getElementById("clientChatBox");
+      if (!data.messages.length) {
+        box.innerHTML = `<p style="font-size:12px; color:var(--muted); text-align:center; margin-top:40px;">Напишите нам — сообщение сразу уйдет менеджеру в Telegram и на сайт.</p>`;
+        return;
+      }
+      box.innerHTML = data.messages.map(m => `
+        <div class="msg-bubble ${m.sender_role}">
+          <div>${m.text}</div>
+          <div class="msg-meta">${m.sender_role === "admin" ? "Менеджер" : "Вы"}</div>
+        </div>
+      `).join("");
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function sendClientChat() {
+      const input = document.getElementById("clientChatInput");
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = "";
+      const cid = getClientChatId();
+      const cname = tgUser ? tgUser.full_name : `Гость сайта #${Math.abs(cid)}`;
+
+      await fetch("/api/chat/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_tg_id: cid, client_name: cname, text, source: "web" }),
+      });
+      await refreshClientChat();
+    }
+
+    async function openAdminChatsModal() {
+      openModal("adminChatsModal");
+      const res = await fetch("/api/admin/chats", { headers: { "X-Admin-Token": adminToken } });
+      const data = await res.json();
+      const listEl = document.getElementById("adminThreadList");
+      if (!data.threads.length) {
+        listEl.innerHTML = `<p style="font-size:11px; color:var(--muted);">Чатов пока нет</p>`;
+        return;
+      }
+      if (!activeAdminChatClientId) activeAdminChatClientId = data.threads[0].client_tg_id;
+      listEl.innerHTML = data.threads.map(t => `
+        <div class="thread-item ${t.client_tg_id === activeAdminChatClientId ? "active" : ""}" onclick="selectAdminThread(${t.client_tg_id})">
+          <b>${t.client_name}</b><br/>
+          <span style="color:var(--muted);">${(t.last_text || "").slice(0, 24)}</span>
+        </div>
+      `).join("");
+      await loadAdminThreadMessages(activeAdminChatClientId);
+    }
+
+    async function selectAdminThread(cid) {
+      activeAdminChatClientId = cid;
+      openAdminChatsModal();
+    }
+
+    async function loadAdminThreadMessages(cid) {
+      const res = await fetch(`/api/chat/${cid}`);
+      const data = await res.json();
+      const box = document.getElementById("adminChatMessages");
+      box.innerHTML = data.messages.map(m => `
+        <div class="msg-bubble ${m.sender_role === "admin" ? "client" : "admin"}">
+          <div>${m.text}</div>
+          <div class="msg-meta">${m.sender_role === "admin" ? "Вы (Админ)" : m.client_name}</div>
+        </div>
+      `).join("");
+      box.scrollTop = box.scrollHeight;
+    }
+
+    async function sendAdminReply() {
+      const input = document.getElementById("adminReplyInput");
+      const text = input.value.trim();
+      if (!text || !activeAdminChatClientId) return;
+      input.value = "";
+      await fetch("/api/admin/chat/reply", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ client_tg_id: activeAdminChatClientId, text }),
+      });
+      await loadAdminThreadMessages(activeAdminChatClientId);
+    }
+
+    function openAddGroupModal() {
+      openModal("addGroupModal");
+    }
+
+    async function submitNewGroup() {
+      const title = document.getElementById("grpTitleInput").value.trim();
+      const slug = document.getElementById("grpSlugInput").value.trim();
+      const description = document.getElementById("grpDescInput").value.trim();
+      const coverInput = document.getElementById("grpCoverInput");
+      let cover = "";
+
+      if (coverInput.files && coverInput.files[0]) {
+        const fd = new FormData();
+        fd.append("files", coverInput.files[0]);
+        const up = await (await fetch("/api/upload", { method: "POST", body: fd })).json();
+        cover = (up.urls && up.urls[0]) || "";
+      }
+
+      const res = await fetch("/api/groups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Admin-Token": adminToken },
+        body: JSON.stringify({ title, slug, cover, description }),
+      });
+      if (res.ok) {
+        closeAllModals();
+        showToast("✅ Группа создана!");
+        await loadBootstrap();
+      }
+    }
+
+    function openAddProductModal() {
+      const sel = document.getElementById("prodGroupSelect");
+      sel.innerHTML = appState.groups.map(g => `<option value="${g.slug}">${g.title}</option>`).join("");
+      const builder = document.getElementById("sizeChartBuilder");
+      builder.innerHTML = "";
+      ["S", "M", "L", "XL"].forEach(sz => addSizeBuilderRow(sz, 5, "56", "52", "70"));
+      openModal("addProductModal");
+    }
+
+    function addSizeBuilderRow(sz = "", qty = 5, chest = "", shoulders = "", length = "") {
+      const row = document.createElement("div");
+      row.className = "chart-row-edit";
+      row.innerHTML = `
+        <input placeholder="Размер" value="${sz}" />
+        <input type="number" placeholder="Шт." value="${qty}" />
+        <input placeholder="Грудь" value="${chest}" />
+        <input placeholder="Плечи" value="${shoulders}" />
+        <input placeholder="Длина" value="${length}" />
+      `;
+      document.getElementById("sizeChartBuilder").appendChild(row);
+    }
+
+    async function submitNewProduct() {
+      const group_slug = document.getElementById("prodGroupSelect").value;
+      const name = document.getElementById("prodNameInput").value.trim();
+      const price = Number(document.getElementById("prodPriceInput").value);
+      const fabric = document.getElementById("prodFabricInput").value.trim();
+      const description = document.getElementById("prodDescInput").value.trim();
+      const files = document.getElementById("prodPhotosInput").files;
+
+      if (!name || !price) return showToast("Укажите название и цену", true);
+
+      let photos = [];
+      if (files && files.length) {
+        const fd = new FormData();
+        for (const f of files) fd.append("files", f);
+        const up = await (await fetch("/api/upload", { method: "POST", body: fd })).json();
+        photos = up.urls || [];
+      }
+
+      const stock = {};
+      const size_chart = [];
+      document.querySelectorAll("#sizeChartBuilder .chart-row-edit").forEach(row => {
+        const inputs = row.querySelectorAll("input");
+        const sz = inputs[0].value.trim();
+        if (sz) {
+          stock[sz] = Number(inputs[1].value || 0);
+          size_chart.push({
+            size: sz,
+            chest: inputs[2].value.trim(),
+            shoulders: inputs[3].value.trim(),
+            length: inputs[4].value.trim(),
+          });
+        }
+      });
+
+      const res = await fetch("/api/products", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Admin-Token": adminToken },
+        body: JSON.stringify({ group_slug, name, price, fabric, description, photos, stock, size_chart }),
+      });
+
+      if (res.ok) {
+        closeAllModals();
+        showToast("✅ Товар опубликован!");
+        await loadBootstrap();
+      }
+    }
+
+    async function adminDeleteProduct(pid) {
+      if (!confirm("Удалить товар?")) return;
+      await fetch(`/api/products/${pid}`, {
+        method: "DELETE",
+        headers: { "X-Admin-Token": adminToken },
+      });
+      showToast("🗑 Товар удален");
+      await loadBootstrap();
+    }
+
+    function updateCartBadge() {
+      document.getElementById("cartCount").textContent = cart.reduce((s, i) => s + i.qty, 0);
+      localStorage.setItem("atelier_cart_v2", JSON.stringify(cart));
+    }
+
+    function addProductToCart(pid) {
+      const p = appState.products.find(x => x.id === pid);
+      const sz = selectedSizes[pid];
+      const avail = Number((p.stock || {})[sz] || 0);
+      if (avail <= 0) return showToast("Выбранный размер закончился", true);
+
+      const ex = cart.find(i => i.product_id === pid && i.size === sz);
+      if (ex) ex.qty += 1;
+      else cart.push({ product_id: pid, name: p.name, price: p.price, size: sz, qty: 1 });
+      updateCartBadge();
+      showToast(`Добавлено: ${p.name} (${sz})`);
+    }
+
+    function openCartModal() {
+      const body = document.getElementById("cartBody");
+      if (!cart.length) {
+        body.innerHTML = `<p style="color:var(--muted); text-align:center; padding:20px;">Корзина пуста</p>`;
+        return openModal("cartModal");
+      }
+      const sub = cart.reduce((s, i) => s + i.price * i.qty, 0);
+      const deliv = sub >= 5000 ? 0 : 350;
+      const total = sub + deliv;
+      const defaultName = tgUser ? tgUser.full_name : "";
+
+      body.innerHTML = `
+        ${cart.map((i, idx) => `
+          <div class="order-box" style="display:flex; justify-content:space-between; align-items:center;">
+            <div><b>${i.name}</b><br/><small>Размер: ${i.size} • ${formatPrice(i.price)}</small></div>
+            <div>
+              <button class="btn-outline" onclick="changeCartQty(${idx}, -1)">−</button>
+              <b style="margin:0 6px;">${i.qty}</b>
+              <button class="btn-outline" onclick="changeCartQty(${idx}, 1)">+</button>
+            </div>
+          </div>
+        `).join("")}
+        <div class="form-group"><label>Имя и телефон</label><input class="input" id="ordName" value="${defaultName}" placeholder="Имя, +7..." /></div>
+        <div class="form-group"><label>Адрес доставки (СДЭК / Почта)</label><input class="input" id="ordAddr" placeholder="Город, адрес ПВЗ" /></div>
+        <div style="margin-top:12px; font-weight:800;">Итого (с доставкой ${deliv ? deliv + " ₽" : "бесплатно"}): ${formatPrice(total)}</div>
+        <button class="primary-btn" onclick="checkoutCart(${deliv}, ${total})">Оформить заказ →</button>
+      `;
+      openModal("cartModal");
+    }
+
+    function changeCartQty(idx, delta) {
+      cart[idx].qty += delta;
+      if (cart[idx].qty <= 0) cart.splice(idx, 1);
+      updateCartBadge();
+      openCartModal();
+    }
+
+    async function checkoutCart(delivery_cost, total_amount) {
+      const customer_name = document.getElementById("ordName").value.trim();
+      const address = document.getElementById("ordAddr").value.trim();
+      if (!customer_name || !address) return showToast("Заполните имя и адрес", true);
+
+      const res = await fetch("/api/orders", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_tg_id: tgUser ? tgUser.tg_id : 0,
+          customer_name,
+          address,
+          items: cart,
+          delivery_cost,
+          total_amount,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        cart = [];
+        updateCartBadge();
+        closeAllModals();
+        showToast(`✅ Заказ #${data.order_id} оформлен!`);
+        await loadBootstrap();
+      }
+    }
+
+    function openContactsModal() { openModal("contactsModal"); }
+    function copyPhone() {
+      navigator.clipboard?.writeText(appState.contact_phone);
+      showToast("Номер +79917994883 скопирован!");
+    }
+    function copyPromo() {
+      navigator.clipboard?.writeText("ATELIER10");
+      showToast("Промокод ATELIER10 скопирован!");
+    }
+    function openBotManager() {
+      const url = `https://t.me/${appState.bot_username || "Ateliershopbot"}`;
+      if (tgApp && tgApp.openTelegramLink) tgApp.openTelegramLink(url);
+      else window.open(url, "_blank");
+    }
+
+    function openModal(id) {
+      closeAllModals();
+      document.getElementById(id).classList.add("open");
+      document.getElementById("overlay").classList.add("open");
+    }
+    function closeAllModals() {
+      document.querySelectorAll(".modal").forEach(m => m.classList.remove("open"));
+      document.getElementById("overlay").classList.remove("open");
+    }
+
+    updateCartBadge();
+    initTelegramAuth();
+    checkSavedAdminToken();
+    loadBootstrap();
+  </script>
+</body>
+</html>
